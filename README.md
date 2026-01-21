@@ -2,13 +2,12 @@
 
 A production-ready DocuSign-style application for Texas residential leases (TAR TXR-2001 form), built with Node.js and React.
 
-<!-- Replace YOUR_USERNAME with your GitHub username after creating the repo -->
-![CI](https://github.com/YOUR_USERNAME/leasesign/workflows/CI/badge.svg)
+![CI](https://github.com/exemic8973/leasesign/workflows/CI/badge.svg)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 ![Node](https://img.shields.io/badge/Node.js-18%2B-green)
 ![Docker](https://img.shields.io/badge/Docker-Ready-blue)
 
-## ✨ Features
+## Features
 
 ### 🔐 Authentication
 - User registration and login
