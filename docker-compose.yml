@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  leasesign:
+    build: .
+    container_name: leasesign-app
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - APP_URL=http://localhost:3000
+      - JWT_SECRET=${JWT_SECRET:-change-this-secret-in-production}
+      # Email configuration (uncomment and configure)
+      # - SMTP_HOST=smtp.gmail.com
+      # - SMTP_PORT=587
+      # - SMTP_USER=your-email@gmail.com
+      # - SMTP_PASS=your-app-password
+      # - SMTP_FROM="LeaseSign" <noreply@yourdomain.com>
+    volumes:
+      - leasesign-data:/app/data
+      - leasesign-uploads:/app/uploads
+      - leasesign-generated:/app/generated
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  leasesign-data:
+    driver: local
+  leasesign-uploads:
+    driver: local
+  leasesign-generated:
+    driver: local
+
+# For production with external database (PostgreSQL example):
+# 
+# services:
+#   leasesign:
+#     ...
+#     environment:
+#       - DATABASE_URL=postgresql://user:pass@db:5432/leasesign
+#     depends_on:
+#       - db
+#
+#   db:
+#     image: postgres:15-alpine
+#     environment:
+#       - POSTGRES_USER=leasesign
+#       - POSTGRES_PASSWORD=your-secure-password
+#       - POSTGRES_DB=leasesign
+#     volumes:
+#       - postgres-data:/var/lib/postgresql/data
+#     restart: unless-stopped
+#
+# volumes:
+#   postgres-data:

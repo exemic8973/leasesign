@@ -1,0 +1,128 @@
+# Continuous Integration Workflow
+# Runs on every push and pull request to validate the codebase
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test & Validate
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check for security vulnerabilities
+        run: npm audit --audit-level=high
+        continue-on-error: true
+
+      - name: Start server and health check
+        run: |
+          # Start server in background
+          node server/index.js &
+          SERVER_PID=$!
+          
+          # Wait for server to start
+          sleep 3
+          
+          # Health check
+          curl -f http://localhost:3000/api/health || exit 1
+          
+          # Test auth endpoints exist
+          curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/auth/me | grep -q "401" || exit 1
+          
+          # Kill server
+          kill $SERVER_PID
+          
+          echo "✅ Server health check passed"
+
+      - name: Validate frontend loads
+        run: |
+          # Check that index.html exists and has React
+          grep -q "react" public/index.html || exit 1
+          grep -q "LeaseSign" public/index.html || exit 1
+          echo "✅ Frontend validation passed"
+
+  lint:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+
+      - name: Check for syntax errors
+        run: |
+          node --check server/index.js
+          echo "✅ No syntax errors found"
+
+      - name: Check file structure
+        run: |
+          test -f server/index.js || exit 1
+          test -f public/index.html || exit 1
+          test -f package.json || exit 1
+          test -f Dockerfile || exit 1
+          test -f README.md || exit 1
+          echo "✅ Required files present"
+
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: [test, lint]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: leasesign:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Test Docker container
+        run: |
+          # Run container
+          docker run -d --name leasesign-test -p 3000:3000 leasesign:test
+          
+          # Wait for startup
+          sleep 5
+          
+          # Health check
+          curl -f http://localhost:3000/api/health || exit 1
+          
+          # Cleanup
+          docker stop leasesign-test
+          docker rm leasesign-test
+          
+          echo "✅ Docker container test passed"

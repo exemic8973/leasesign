@@ -1,0 +1,124 @@
+# Deploy Workflow
+# Deploys to various cloud platforms
+# Uncomment the section for your preferred platform
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # ============================================
+  # OPTION 1: Deploy to Railway
+  # ============================================
+  # deploy-railway:
+  #   name: Deploy to Railway
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
+  #     
+  #     - name: Install Railway CLI
+  #       run: npm install -g @railway/cli
+  #     
+  #     - name: Deploy
+  #       run: railway up
+  #       env:
+  #         RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+  # ============================================
+  # OPTION 2: Deploy to Render
+  # ============================================
+  # deploy-render:
+  #   name: Deploy to Render
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Trigger Render Deploy
+  #       run: |
+  #         curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
+
+  # ============================================
+  # OPTION 3: Deploy to Fly.io
+  # ============================================
+  # deploy-fly:
+  #   name: Deploy to Fly.io
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
+  #     
+  #     - name: Setup Fly CLI
+  #       uses: superfly/flyctl-actions/setup-flyctl@master
+  #     
+  #     - name: Deploy
+  #       run: flyctl deploy --remote-only
+  #       env:
+  #         FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+  # ============================================
+  # OPTION 4: Deploy to DigitalOcean App Platform
+  # ============================================
+  # deploy-digitalocean:
+  #   name: Deploy to DigitalOcean
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Trigger deployment
+  #       run: |
+  #         curl -X POST \
+  #           -H "Authorization: Bearer ${{ secrets.DIGITALOCEAN_TOKEN }}" \
+  #           "https://api.digitalocean.com/v2/apps/${{ secrets.DIGITALOCEAN_APP_ID }}/deployments"
+
+  # ============================================
+  # OPTION 5: Deploy to VPS via SSH
+  # ============================================
+  # deploy-vps:
+  #   name: Deploy to VPS
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Deploy via SSH
+  #       uses: appleboy/ssh-action@master
+  #       with:
+  #         host: ${{ secrets.VPS_HOST }}
+  #         username: ${{ secrets.VPS_USERNAME }}
+  #         key: ${{ secrets.VPS_SSH_KEY }}
+  #         script: |
+  #           cd /var/www/leasesign
+  #           git pull origin main
+  #           npm install
+  #           pm2 restart leasesign
+
+  # ============================================
+  # Default: Just validate (remove when using above)
+  # ============================================
+  validate:
+    name: Validate Deployment Ready
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Validate build
+        run: |
+          node --check server/index.js
+          echo "✅ Ready for deployment"
+          echo ""
+          echo "To enable automatic deployments:"
+          echo "1. Uncomment your preferred platform in .github/workflows/deploy.yml"
+          echo "2. Add the required secrets to your repository"
+          echo ""
+          echo "Supported platforms:"
+          echo "  - Railway (RAILWAY_TOKEN)"
+          echo "  - Render (RENDER_DEPLOY_HOOK_URL)"
+          echo "  - Fly.io (FLY_API_TOKEN)"
+          echo "  - DigitalOcean (DIGITALOCEAN_TOKEN, DIGITALOCEAN_APP_ID)"
+          echo "  - VPS via SSH (VPS_HOST, VPS_USERNAME, VPS_SSH_KEY)"
