@@ -1,0 +1,35 @@
+{
+  "name": "leasesign",
+  "version": "1.0.0",
+  "description": "Production-ready Texas Residential Lease E-Signature Platform - DocuSign-style application for TAR TXR-2001 forms",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js"
+  },
+  "keywords": [
+    "lease",
+    "e-signature",
+    "texas",
+    "rental",
+    "docusign",
+    "tar",
+    "residential",
+    "property-management",
+    "real-estate"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.2",
+    "nodemailer": "^6.9.7",
+    "pdfkit": "^0.14.0",
+    "uuid": "^9.0.0"
+  }
+}
