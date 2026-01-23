@@ -1,7 +1,7 @@
 /**
  * LeaseSign Production Server
  * Texas Residential Lease E-Signature Platform
- * 
+ *
  * Features:
  * - User authentication (JWT)
  * - Document management (CRUD)
@@ -10,6 +10,9 @@
  * - PDF generation with TAR form
  * - Audit logging
  */
+
+// Load environment variables from .env file
+require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
@@ -108,30 +111,117 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, '../public')));
 
 // Email transporter
-const createMailer = () => {
+let mailer = null;
+
+const createMailer = async () => {
+  // Check if custom SMTP is configured
   if (process.env.SMTP_HOST) {
-    return nodemailer.createTransport({
+    const smtpConfig = {
       host: process.env.SMTP_HOST,
       port: parseInt(process.env.SMTP_PORT) || 587,
       secure: process.env.SMTP_SECURE === 'true',
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
-    });
-  }
-  // Development: log emails to console
-  return {
-    sendMail: async (opts) => {
-      console.log('\n' + '='.repeat(60));
-      console.log('📧 EMAIL NOTIFICATION');
-      console.log('='.repeat(60));
-      console.log(`To: ${opts.to}`);
-      console.log(`Subject: ${opts.subject}`);
-      console.log(`Sign Link: ${opts.text?.match(/http[^\s]+/)?.[0] || 'N/A'}`);
-      console.log('='.repeat(60) + '\n');
-      return { messageId: `dev-${Date.now()}` };
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS
+      }
+    };
+
+    console.log('='.repeat(60));
+    console.log('📧 CUSTOM SMTP CONFIGURED');
+    console.log('='.repeat(60));
+    console.log(`Host: ${smtpConfig.host}`);
+    console.log(`Port: ${smtpConfig.port}`);
+    console.log(`Secure: ${smtpConfig.secure}`);
+    console.log(`User: ${smtpConfig.auth.user}`);
+    console.log('='.repeat(60));
+
+    const transporter = nodemailer.createTransport(smtpConfig);
+
+    // Verify SMTP connection
+    try {
+      await transporter.verify();
+      console.log('✅ SMTP connection verified successfully!\n');
+    } catch (err) {
+      console.error('❌ SMTP connection failed:', err.message);
+      console.log('⚠️  Emails may not be delivered. Check your SMTP settings.\n');
     }
+
+    // Wrap sendMail to log sent emails
+    const originalSendMail = transporter.sendMail.bind(transporter);
+    transporter.sendMail = async (opts) => {
+      try {
+        const info = await originalSendMail(opts);
+        console.log('\n' + '='.repeat(60));
+        console.log('📧 EMAIL SENT SUCCESSFULLY');
+        console.log('='.repeat(60));
+        console.log(`To: ${opts.to}`);
+        console.log(`Subject: ${opts.subject}`);
+        console.log(`Message ID: ${info.messageId}`);
+        console.log('='.repeat(60) + '\n');
+        return info;
+      } catch (err) {
+        console.error('\n' + '='.repeat(60));
+        console.error('❌ EMAIL FAILED TO SEND');
+        console.error('='.repeat(60));
+        console.error(`To: ${opts.to}`);
+        console.error(`Error: ${err.message}`);
+        console.error('='.repeat(60) + '\n');
+        throw err;
+      }
+    };
+
+    return transporter;
+  }
+
+  // Development: use Ethereal for email testing
+  console.log('📧 No SMTP configured. Creating Ethereal test email account...');
+  const testAccount = await nodemailer.createTestAccount();
+  console.log('='.repeat(60));
+  console.log('📧 ETHEREAL TEST EMAIL CONFIGURED');
+  console.log('='.repeat(60));
+  console.log(`View sent emails at: https://ethereal.email`);
+  console.log(`Login: ${testAccount.user}`);
+  console.log(`Password: ${testAccount.pass}`);
+  console.log('='.repeat(60));
+  console.log('💡 To use your own SMTP, create a .env file with:');
+  console.log('   SMTP_HOST=smtp.gmail.com');
+  console.log('   SMTP_PORT=587');
+  console.log('   SMTP_SECURE=false');
+  console.log('   SMTP_USER=your-email@gmail.com');
+  console.log('   SMTP_PASS=your-app-password');
+  console.log('='.repeat(60) + '\n');
+
+  const transporter = nodemailer.createTransport({
+    host: 'smtp.ethereal.email',
+    port: 587,
+    secure: false,
+    auth: {
+      user: testAccount.user,
+      pass: testAccount.pass
+    }
+  });
+
+  // Wrap sendMail to log preview URLs
+  const originalSendMail = transporter.sendMail.bind(transporter);
+  transporter.sendMail = async (opts) => {
+    const info = await originalSendMail(opts);
+    console.log('\n' + '='.repeat(60));
+    console.log('📧 EMAIL SENT (Ethereal)');
+    console.log('='.repeat(60));
+    console.log(`To: ${opts.to}`);
+    console.log(`Subject: ${opts.subject}`);
+    console.log(`Preview URL: ${nodemailer.getTestMessageUrl(info)}`);
+    console.log('='.repeat(60) + '\n');
+    return info;
   };
+
+  return transporter;
 };
-const mailer = createMailer();
+
+// Initialize mailer asynchronously
+(async () => {
+  mailer = await createMailer();
+})();
 
 // Auth middleware
 const auth = (req, res, next) => {

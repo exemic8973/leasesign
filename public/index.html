@@ -390,36 +390,64 @@
         function CreateModal({ onClose, onCreate, user, template }) {
             const [step, setStep] = useState(1);
             const [form, setForm] = useState({
-                title: template?.title || '', 
-                landlordName: template?.landlordName || user.name, 
-                landlordEmail: template?.landlordEmail || user.email, 
+                title: template?.title || '',
+                landlordName: template?.landlordName || user.name,
+                landlordEmail: template?.landlordEmail || user.email,
                 landlordPhone: template?.landlordPhone || user.phone || '',
-                tenantName: template?.tenantName || '', 
-                tenantEmail: template?.tenantEmail || '', 
+                landlordAddress: template?.landlordAddress || '',
+                tenantName: template?.tenantName || '',
+                tenantEmail: template?.tenantEmail || '',
                 tenantPhone: template?.tenantPhone || '',
-                propertyAddress: template?.propertyAddress || '', 
-                propertyCity: template?.propertyCity || '', 
-                propertyZip: template?.propertyZip || '', 
-                propertyCounty: template?.propertyCounty || '', 
+                additionalOccupants: template?.additionalOccupants || '',
+                propertyAddress: template?.propertyAddress || '',
+                propertyCity: template?.propertyCity || '',
+                propertyZip: template?.propertyZip || '',
+                propertyCounty: template?.propertyCounty || '',
                 legalDescription: template?.legalDescription || '',
-                commencementDate: template?.commencementDate || '', 
-                expirationDate: template?.expirationDate || '', 
-                monthlyRent: template?.monthlyRent || '', 
+                propertyType: template?.propertyType || 'single-family',
+                bedrooms: template?.bedrooms || '',
+                bathrooms: template?.bathrooms || '',
+                squareFeet: template?.squareFeet || '',
+                parkingSpaces: template?.parkingSpaces || '2',
+                commencementDate: template?.commencementDate || '',
+                expirationDate: template?.expirationDate || '',
+                monthlyRent: template?.monthlyRent || '',
                 securityDeposit: template?.securityDeposit || '',
-                gracePeriodDay: template?.gracePeriodDay || '3', 
-                initialLateFee: template?.initialLateFee || '50', 
-                dailyLateFee: template?.dailyLateFee || '25', 
+                proratedRent: template?.proratedRent || '',
+                proratedDueDate: template?.proratedDueDate || '',
+                gracePeriodDay: template?.gracePeriodDay || '3',
+                initialLateFee: template?.initialLateFee || '50',
+                dailyLateFee: template?.dailyLateFee || '25',
                 returnedPaymentFee: template?.returnedPaymentFee || '75',
-                paymentName: template?.paymentName || '', 
-                paymentAddress: template?.paymentAddress || '', 
+                paymentName: template?.paymentName || '',
+                paymentAddress: template?.paymentAddress || '',
+                paymentMethods: template?.paymentMethods || ['check', 'electronic'],
+                petsAllowed: template?.petsAllowed || false,
+                petDeposit: template?.petDeposit || '',
+                petRent: template?.petRent || '',
+                allowedPets: template?.allowedPets || '',
+                smokingAllowed: template?.smokingAllowed || false,
+                utilitiesTenant: template?.utilitiesTenant || ['electric', 'gas', 'water', 'trash', 'internet'],
+                utilitiesLandlord: template?.utilitiesLandlord || [],
+                hoaName: template?.hoaName || '',
+                accessNoticeHours: template?.accessNoticeHours || '24',
+                terminationNoticeDays: template?.terminationNoticeDays || '30',
                 specialProvisions: template?.specialProvisions || ''
             });
             const upd = (k, v) => setForm({ ...form, [k]: v });
+            const toggleArray = (arr, val) => arr.includes(val) ? arr.filter(x => x !== val) : [...arr, val];
 
             const submit = () => {
-                const title = form.title || `Residential Lease - ${form.propertyAddress?.split(',')[0] || 'New Property'}`;
+                const title = form.title || `Lease for ${form.propertyAddress?.split(',')[0] || 'New Property'}`;
                 onCreate({ ...form, title });
             };
+
+            const Checkbox = ({ checked, onChange, label }) => (
+                <label style={{display:'flex',alignItems:'center',gap:'0.5rem',cursor:'pointer',fontSize:'0.9rem'}}>
+                    <input type="checkbox" checked={checked} onChange={onChange} style={{width:'18px',height:'18px',accentColor:'var(--primary)'}}/>
+                    {label}
+                </label>
+            );
 
             return (
                 <div className="modal-overlay" onClick={onClose}>
@@ -432,74 +460,178 @@
                             <div className="tabs">
                                 <div className={`tab ${step===1?'active':''}`} onClick={()=>setStep(1)}>1. Parties</div>
                                 <div className={`tab ${step===2?'active':''}`} onClick={()=>setStep(2)}>2. Property</div>
-                                <div className={`tab ${step===3?'active':''}`} onClick={()=>setStep(3)}>3. Terms</div>
-                                <div className={`tab ${step===4?'active':''}`} onClick={()=>setStep(4)}>4. Fees & Extras</div>
+                                <div className={`tab ${step===3?'active':''}`} onClick={()=>setStep(3)}>3. Lease Terms</div>
+                                <div className={`tab ${step===4?'active':''}`} onClick={()=>setStep(4)}>4. Rent & Fees</div>
+                                <div className={`tab ${step===5?'active':''}`} onClick={()=>setStep(5)}>5. Rules</div>
+                                <div className={`tab ${step===6?'active':''}`} onClick={()=>setStep(6)}>6. Additional</div>
                             </div>
 
                             {step === 1 && <>
                                 <div className="form-section">
-                                    <h3 className="form-section-title">👤 Landlord</h3>
+                                    <h3 className="form-section-title">LANDLORD/OWNER INFORMATION</h3>
                                     <div className="form-grid">
-                                        <div className="form-group"><label>Name *</label><input value={form.landlordName} onChange={e=>upd('landlordName',e.target.value)}/></div>
-                                        <div className="form-group"><label>Email *</label><input type="email" value={form.landlordEmail} onChange={e=>upd('landlordEmail',e.target.value)}/></div>
-                                        <div className="form-group"><label>Phone</label><input value={form.landlordPhone} onChange={e=>upd('landlordPhone',e.target.value)}/></div>
+                                        <div className="form-group"><label>Full Legal Name *</label><input value={form.landlordName} onChange={e=>upd('landlordName',e.target.value)} placeholder="John Smith"/></div>
+                                        <div className="form-group"><label>Email Address *</label><input type="email" value={form.landlordEmail} onChange={e=>upd('landlordEmail',e.target.value)} placeholder="landlord@email.com"/></div>
+                                        <div className="form-group"><label>Phone Number</label><input value={form.landlordPhone} onChange={e=>upd('landlordPhone',e.target.value)} placeholder="(512) 555-1234"/></div>
+                                        <div className="form-group"><label>Mailing Address</label><input value={form.landlordAddress} onChange={e=>upd('landlordAddress',e.target.value)} placeholder="123 Main St, Austin, TX 78701"/></div>
                                     </div>
                                 </div>
                                 <div className="form-section">
-                                    <h3 className="form-section-title">👥 Tenant</h3>
+                                    <h3 className="form-section-title">TENANT INFORMATION</h3>
                                     <div className="form-grid">
-                                        <div className="form-group"><label>Name *</label><input value={form.tenantName} onChange={e=>upd('tenantName',e.target.value)}/></div>
-                                        <div className="form-group"><label>Email *</label><input type="email" value={form.tenantEmail} onChange={e=>upd('tenantEmail',e.target.value)}/></div>
-                                        <div className="form-group"><label>Phone</label><input value={form.tenantPhone} onChange={e=>upd('tenantPhone',e.target.value)}/></div>
+                                        <div className="form-group"><label>Primary Tenant Full Legal Name *</label><input value={form.tenantName} onChange={e=>upd('tenantName',e.target.value)} placeholder="Jane Doe"/></div>
+                                        <div className="form-group"><label>Email Address *</label><input type="email" value={form.tenantEmail} onChange={e=>upd('tenantEmail',e.target.value)} placeholder="tenant@email.com"/></div>
+                                        <div className="form-group"><label>Phone Number</label><input value={form.tenantPhone} onChange={e=>upd('tenantPhone',e.target.value)} placeholder="(512) 555-5678"/></div>
+                                        <div className="form-group full-width"><label>Additional Occupants (names of all persons who will reside at property)</label><input value={form.additionalOccupants} onChange={e=>upd('additionalOccupants',e.target.value)} placeholder="John Doe Jr., Jane Doe Jr."/></div>
+                                    </div>
+                                    <p className="form-hint">All occupants 18 years or older must be listed on the lease.</p>
+                                </div>
+                            </>}
+
+                            {step === 2 && <>
+                                <div className="form-section">
+                                    <h3 className="form-section-title">PROPERTY ADDRESS</h3>
+                                    <div className="form-grid">
+                                        <div className="form-group full-width"><label>Street Address *</label><input value={form.propertyAddress} onChange={e=>upd('propertyAddress',e.target.value)} placeholder="237 Majestic Cedar Dr"/></div>
+                                        <div className="form-group"><label>City *</label><input value={form.propertyCity} onChange={e=>upd('propertyCity',e.target.value)} placeholder="Round Rock"/></div>
+                                        <div className="form-group"><label>ZIP Code *</label><input value={form.propertyZip} onChange={e=>upd('propertyZip',e.target.value)} placeholder="78665"/></div>
+                                        <div className="form-group"><label>County *</label><input value={form.propertyCounty} onChange={e=>upd('propertyCounty',e.target.value)} placeholder="Williamson"/></div>
+                                        <div className="form-group full-width"><label>Legal Description (Lot, Block, Subdivision)</label><input value={form.legalDescription} onChange={e=>upd('legalDescription',e.target.value)} placeholder="LOT 6, BLOCK OO, SIENA SEC 14, WILLIAMSON COUNTY, TEXAS"/></div>
+                                    </div>
+                                </div>
+                                <div className="form-section">
+                                    <h3 className="form-section-title">PROPERTY DETAILS</h3>
+                                    <div className="form-grid">
+                                        <div className="form-group">
+                                            <label>Property Type</label>
+                                            <select value={form.propertyType} onChange={e=>upd('propertyType',e.target.value)}>
+                                                <option value="single-family">Single Family Home</option>
+                                                <option value="condo">Condominium</option>
+                                                <option value="townhouse">Townhouse</option>
+                                                <option value="apartment">Apartment</option>
+                                                <option value="duplex">Duplex</option>
+                                            </select>
+                                        </div>
+                                        <div className="form-group"><label>Bedrooms</label><input type="number" value={form.bedrooms} onChange={e=>upd('bedrooms',e.target.value)} placeholder="3"/></div>
+                                        <div className="form-group"><label>Bathrooms</label><input type="number" step="0.5" value={form.bathrooms} onChange={e=>upd('bathrooms',e.target.value)} placeholder="2.5"/></div>
+                                        <div className="form-group"><label>Square Feet</label><input type="number" value={form.squareFeet} onChange={e=>upd('squareFeet',e.target.value)} placeholder="2400"/></div>
+                                        <div className="form-group"><label>Parking Spaces</label><input type="number" value={form.parkingSpaces} onChange={e=>upd('parkingSpaces',e.target.value)} placeholder="2"/></div>
+                                        <div className="form-group"><label>HOA Name (if applicable)</label><input value={form.hoaName} onChange={e=>upd('hoaName',e.target.value)} placeholder="Siena Homeowners Association"/></div>
                                     </div>
                                 </div>
                             </>}
 
-                            {step === 2 && <div className="form-section">
-                                <h3 className="form-section-title">🏠 Property Details</h3>
-                                <div className="form-grid">
-                                    <div className="form-group full-width"><label>Street Address *</label><input value={form.propertyAddress} onChange={e=>upd('propertyAddress',e.target.value)} placeholder="123 Main Street"/></div>
-                                    <div className="form-group"><label>City *</label><input value={form.propertyCity} onChange={e=>upd('propertyCity',e.target.value)} placeholder="Round Rock"/></div>
-                                    <div className="form-group"><label>ZIP *</label><input value={form.propertyZip} onChange={e=>upd('propertyZip',e.target.value)} placeholder="78665"/></div>
-                                    <div className="form-group"><label>County *</label><input value={form.propertyCounty} onChange={e=>upd('propertyCounty',e.target.value)} placeholder="Williamson"/></div>
-                                    <div className="form-group"><label>Legal Description</label><input value={form.legalDescription} onChange={e=>upd('legalDescription',e.target.value)} placeholder="LOT 6, BLOCK OO, SIENA SEC 14"/></div>
+                            {step === 3 && <>
+                                <div className="form-section">
+                                    <h3 className="form-section-title">LEASE TERM</h3>
+                                    <div className="form-grid">
+                                        <div className="form-group"><label>Lease Start Date (Commencement) *</label><input type="date" value={form.commencementDate} onChange={e=>upd('commencementDate',e.target.value)}/></div>
+                                        <div className="form-group"><label>Lease End Date (Expiration) *</label><input type="date" value={form.expirationDate} onChange={e=>upd('expirationDate',e.target.value)}/></div>
+                                        <div className="form-group"><label>Termination Notice (days)</label><input type="number" value={form.terminationNoticeDays} onChange={e=>upd('terminationNoticeDays',e.target.value)} placeholder="30"/><p className="form-hint">Days notice required before lease end</p></div>
+                                        <div className="form-group"><label>Access Notice (hours)</label><input type="number" value={form.accessNoticeHours} onChange={e=>upd('accessNoticeHours',e.target.value)} placeholder="24"/><p className="form-hint">Notice before landlord entry</p></div>
+                                    </div>
                                 </div>
-                            </div>}
-
-                            {step === 3 && <div className="form-section">
-                                <h3 className="form-section-title">📋 Lease Terms</h3>
-                                <div className="form-grid">
-                                    <div className="form-group"><label>Monthly Rent ($) *</label><input type="number" value={form.monthlyRent} onChange={e=>upd('monthlyRent',e.target.value)} placeholder="2300"/></div>
-                                    <div className="form-group"><label>Security Deposit ($) *</label><input type="number" value={form.securityDeposit} onChange={e=>upd('securityDeposit',e.target.value)} placeholder="2300"/></div>
-                                    <div className="form-group"><label>Start Date *</label><input type="date" value={form.commencementDate} onChange={e=>upd('commencementDate',e.target.value)}/></div>
-                                    <div className="form-group"><label>End Date *</label><input type="date" value={form.expirationDate} onChange={e=>upd('expirationDate',e.target.value)}/></div>
-                                </div>
-                            </div>}
+                                <div className="alert alert-info" style={{marginTop:'1rem'}}><span className="alert-icon">ℹ️</span><div>Per Texas Property Code, lease automatically renews month-to-month unless either party provides written notice of termination.</div></div>
+                            </>}
 
                             {step === 4 && <>
                                 <div className="form-section">
-                                    <h3 className="form-section-title">💰 Late Fees</h3>
+                                    <h3 className="form-section-title">RENT</h3>
                                     <div className="form-grid">
-                                        <div className="form-group"><label>Grace Period (day)</label><input type="number" value={form.gracePeriodDay} onChange={e=>upd('gracePeriodDay',e.target.value)}/></div>
-                                        <div className="form-group"><label>Initial Late Fee ($)</label><input type="number" value={form.initialLateFee} onChange={e=>upd('initialLateFee',e.target.value)}/></div>
-                                        <div className="form-group"><label>Daily Late Fee ($)</label><input type="number" value={form.dailyLateFee} onChange={e=>upd('dailyLateFee',e.target.value)}/></div>
-                                        <div className="form-group"><label>Returned Payment Fee ($)</label><input type="number" value={form.returnedPaymentFee} onChange={e=>upd('returnedPaymentFee',e.target.value)}/></div>
+                                        <div className="form-group"><label>Monthly Rent *</label><div style={{position:'relative'}}><span style={{position:'absolute',left:'12px',top:'50%',transform:'translateY(-50%)',color:'var(--gray-500)'}}>$</span><input type="number" value={form.monthlyRent} onChange={e=>upd('monthlyRent',e.target.value)} placeholder="2,300" style={{paddingLeft:'28px'}}/></div></div>
+                                        <div className="form-group"><label>Security Deposit *</label><div style={{position:'relative'}}><span style={{position:'absolute',left:'12px',top:'50%',transform:'translateY(-50%)',color:'var(--gray-500)'}}>$</span><input type="number" value={form.securityDeposit} onChange={e=>upd('securityDeposit',e.target.value)} placeholder="2,300" style={{paddingLeft:'28px'}}/></div></div>
+                                        <div className="form-group"><label>Prorated Rent (first month, if any)</label><div style={{position:'relative'}}><span style={{position:'absolute',left:'12px',top:'50%',transform:'translateY(-50%)',color:'var(--gray-500)'}}>$</span><input type="number" value={form.proratedRent} onChange={e=>upd('proratedRent',e.target.value)} placeholder="0" style={{paddingLeft:'28px'}}/></div></div>
+                                        <div className="form-group"><label>Prorated Rent Due Date</label><input type="date" value={form.proratedDueDate} onChange={e=>upd('proratedDueDate',e.target.value)}/></div>
                                     </div>
                                 </div>
                                 <div className="form-section">
-                                    <h3 className="form-section-title">📝 Payment & Special Provisions</h3>
+                                    <h3 className="form-section-title">LATE FEES</h3>
                                     <div className="form-grid">
-                                        <div className="form-group"><label>Payment Recipient</label><input value={form.paymentName} onChange={e=>upd('paymentName',e.target.value)}/></div>
-                                        <div className="form-group"><label>Payment Address</label><input value={form.paymentAddress} onChange={e=>upd('paymentAddress',e.target.value)}/></div>
-                                        <div className="form-group full-width"><label>Special Provisions</label><textarea rows={4} value={form.specialProvisions} onChange={e=>upd('specialProvisions',e.target.value)} placeholder="Any additional terms..."/></div>
+                                        <div className="form-group"><label>Grace Period</label><div style={{display:'flex',alignItems:'center',gap:'8px'}}><input type="number" value={form.gracePeriodDay} onChange={e=>upd('gracePeriodDay',e.target.value)} style={{width:'80px'}}/><span>day(s) of month</span></div></div>
+                                        <div className="form-group"><label>Initial Late Fee</label><div style={{position:'relative'}}><span style={{position:'absolute',left:'12px',top:'50%',transform:'translateY(-50%)',color:'var(--gray-500)'}}>$</span><input type="number" value={form.initialLateFee} onChange={e=>upd('initialLateFee',e.target.value)} placeholder="50" style={{paddingLeft:'28px'}}/></div></div>
+                                        <div className="form-group"><label>Daily Late Fee</label><div style={{position:'relative'}}><span style={{position:'absolute',left:'12px',top:'50%',transform:'translateY(-50%)',color:'var(--gray-500)'}}>$</span><input type="number" value={form.dailyLateFee} onChange={e=>upd('dailyLateFee',e.target.value)} placeholder="25" style={{paddingLeft:'28px'}}/></div></div>
+                                        <div className="form-group"><label>Returned Payment Fee</label><div style={{position:'relative'}}><span style={{position:'absolute',left:'12px',top:'50%',transform:'translateY(-50%)',color:'var(--gray-500)'}}>$</span><input type="number" value={form.returnedPaymentFee} onChange={e=>upd('returnedPaymentFee',e.target.value)} placeholder="75" style={{paddingLeft:'28px'}}/></div></div>
+                                    </div>
+                                    <p className="form-hint">Per Texas Property Code §92.019, late fees must be reasonable.</p>
+                                </div>
+                                <div className="form-section">
+                                    <h3 className="form-section-title">PAYMENT INFORMATION</h3>
+                                    <div className="form-grid">
+                                        <div className="form-group"><label>Make Payments To</label><input value={form.paymentName} onChange={e=>upd('paymentName',e.target.value)} placeholder={form.landlordName || 'Landlord Name'}/></div>
+                                        <div className="form-group"><label>Payment Address</label><input value={form.paymentAddress} onChange={e=>upd('paymentAddress',e.target.value)} placeholder="123 Main St, Austin, TX 78701"/></div>
+                                    </div>
+                                    <div style={{marginTop:'1rem'}}>
+                                        <label style={{display:'block',marginBottom:'0.5rem',fontWeight:500}}>Accepted Payment Methods</label>
+                                        <div style={{display:'flex',flexWrap:'wrap',gap:'1rem'}}>
+                                            <Checkbox checked={form.paymentMethods.includes('check')} onChange={()=>upd('paymentMethods',toggleArray(form.paymentMethods,'check'))} label="Personal Check"/>
+                                            <Checkbox checked={form.paymentMethods.includes('cashiers')} onChange={()=>upd('paymentMethods',toggleArray(form.paymentMethods,'cashiers'))} label="Cashier's Check"/>
+                                            <Checkbox checked={form.paymentMethods.includes('money-order')} onChange={()=>upd('paymentMethods',toggleArray(form.paymentMethods,'money-order'))} label="Money Order"/>
+                                            <Checkbox checked={form.paymentMethods.includes('electronic')} onChange={()=>upd('paymentMethods',toggleArray(form.paymentMethods,'electronic'))} label="Electronic Payment"/>
+                                        </div>
                                     </div>
                                 </div>
+                            </>}
+
+                            {step === 5 && <>
+                                <div className="form-section">
+                                    <h3 className="form-section-title">PET POLICY</h3>
+                                    <div style={{marginBottom:'1rem'}}>
+                                        <Checkbox checked={form.petsAllowed} onChange={()=>upd('petsAllowed',!form.petsAllowed)} label="Pets are allowed on the property"/>
+                                    </div>
+                                    {form.petsAllowed && <div className="form-grid">
+                                        <div className="form-group full-width"><label>Allowed Pets (describe type, breed, weight limits)</label><input value={form.allowedPets} onChange={e=>upd('allowedPets',e.target.value)} placeholder="Up to 2 dogs under 50 lbs each, no aggressive breeds"/></div>
+                                        <div className="form-group"><label>Pet Deposit</label><div style={{position:'relative'}}><span style={{position:'absolute',left:'12px',top:'50%',transform:'translateY(-50%)',color:'var(--gray-500)'}}>$</span><input type="number" value={form.petDeposit} onChange={e=>upd('petDeposit',e.target.value)} placeholder="500" style={{paddingLeft:'28px'}}/></div></div>
+                                        <div className="form-group"><label>Monthly Pet Rent</label><div style={{position:'relative'}}><span style={{position:'absolute',left:'12px',top:'50%',transform:'translateY(-50%)',color:'var(--gray-500)'}}>$</span><input type="number" value={form.petRent} onChange={e=>upd('petRent',e.target.value)} placeholder="25" style={{paddingLeft:'28px'}}/></div></div>
+                                    </div>}
+                                </div>
+                                <div className="form-section">
+                                    <h3 className="form-section-title">SMOKING POLICY</h3>
+                                    <Checkbox checked={form.smokingAllowed} onChange={()=>upd('smokingAllowed',!form.smokingAllowed)} label="Smoking is permitted on the property"/>
+                                    {!form.smokingAllowed && <p className="form-hint" style={{marginTop:'0.5rem'}}>Smoking is prohibited inside the property and within 25 feet of any entrance.</p>}
+                                </div>
+                                <div className="form-section">
+                                    <h3 className="form-section-title">UTILITIES</h3>
+                                    <div style={{marginBottom:'1rem'}}>
+                                        <label style={{display:'block',marginBottom:'0.5rem',fontWeight:500}}>Tenant Pays:</label>
+                                        <div style={{display:'flex',flexWrap:'wrap',gap:'1rem'}}>
+                                            <Checkbox checked={form.utilitiesTenant.includes('electric')} onChange={()=>upd('utilitiesTenant',toggleArray(form.utilitiesTenant,'electric'))} label="Electric"/>
+                                            <Checkbox checked={form.utilitiesTenant.includes('gas')} onChange={()=>upd('utilitiesTenant',toggleArray(form.utilitiesTenant,'gas'))} label="Gas"/>
+                                            <Checkbox checked={form.utilitiesTenant.includes('water')} onChange={()=>upd('utilitiesTenant',toggleArray(form.utilitiesTenant,'water'))} label="Water/Sewer"/>
+                                            <Checkbox checked={form.utilitiesTenant.includes('trash')} onChange={()=>upd('utilitiesTenant',toggleArray(form.utilitiesTenant,'trash'))} label="Trash"/>
+                                            <Checkbox checked={form.utilitiesTenant.includes('internet')} onChange={()=>upd('utilitiesTenant',toggleArray(form.utilitiesTenant,'internet'))} label="Internet/Cable"/>
+                                            <Checkbox checked={form.utilitiesTenant.includes('lawn')} onChange={()=>upd('utilitiesTenant',toggleArray(form.utilitiesTenant,'lawn'))} label="Lawn Care"/>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label style={{display:'block',marginBottom:'0.5rem',fontWeight:500}}>Landlord Pays:</label>
+                                        <div style={{display:'flex',flexWrap:'wrap',gap:'1rem'}}>
+                                            <Checkbox checked={form.utilitiesLandlord.includes('hoa')} onChange={()=>upd('utilitiesLandlord',toggleArray(form.utilitiesLandlord,'hoa'))} label="HOA Fees"/>
+                                            <Checkbox checked={form.utilitiesLandlord.includes('water')} onChange={()=>upd('utilitiesLandlord',toggleArray(form.utilitiesLandlord,'water'))} label="Water/Sewer"/>
+                                            <Checkbox checked={form.utilitiesLandlord.includes('trash')} onChange={()=>upd('utilitiesLandlord',toggleArray(form.utilitiesLandlord,'trash'))} label="Trash"/>
+                                            <Checkbox checked={form.utilitiesLandlord.includes('lawn')} onChange={()=>upd('utilitiesLandlord',toggleArray(form.utilitiesLandlord,'lawn'))} label="Lawn Care"/>
+                                        </div>
+                                    </div>
+                                </div>
+                            </>}
+
+                            {step === 6 && <>
+                                <div className="form-section">
+                                    <h3 className="form-section-title">SPECIAL PROVISIONS</h3>
+                                    <div className="form-group full-width">
+                                        <label>Additional Terms and Conditions</label>
+                                        <textarea rows={6} value={form.specialProvisions} onChange={e=>upd('specialProvisions',e.target.value)} placeholder="Enter any additional terms, conditions, or special agreements between the parties..."/>
+                                        <p className="form-hint">Examples: move-in cleaning requirements, specific maintenance responsibilities, appliance warranties, etc.</p>
+                                    </div>
+                                </div>
+                                <div className="alert alert-warning"><span className="alert-icon">⚠️</span><div><strong>Important Notice</strong><br/>This lease will be governed by Texas Property Code and all applicable local ordinances. Both parties are encouraged to review the complete document before signing.</div></div>
                             </>}
                         </div>
                         <div className="modal-footer">
                             {step > 1 && <button className="btn btn-secondary" onClick={() => setStep(step - 1)}>Previous</button>}
                             <div style={{flex:1}}/>
-                            {step < 4 ? <button className="btn btn-primary" onClick={() => setStep(step + 1)}>Next</button>
+                            <span style={{color:'var(--gray-500)',fontSize:'0.875rem'}}>Step {step} of 6</span>
+                            <div style={{flex:1}}/>
+                            {step < 6 ? <button className="btn btn-primary" onClick={() => setStep(step + 1)}>Next</button>
                                       : <button className="btn btn-primary" onClick={submit}>Create Lease</button>}
                         </div>
                     </div>
@@ -639,39 +771,172 @@
                                 <div className={`tab ${tab==='audit'?'active':''}`} onClick={()=>setTab('audit')}>Audit Log</div>
                             </div>
 
-                            {tab === 'preview' && <div className="doc-preview">
-                                <h1>RESIDENTIAL LEASE</h1>
-                                <p className="subtitle">Texas Association of REALTORS® Form</p>
-                                <div className="section"><p className="section-title">1. PARTIES:</p><p>Landlord: <span className="field">{field(doc.landlordName)}</span> | Tenant: <span className="field">{field(doc.tenantName)}</span></p></div>
-                                <div className="section"><p className="section-title">2. PROPERTY:</p><p>Address: <span className="field">{field(doc.propertyAddress)}, {doc.propertyCity}, TX {doc.propertyZip}</span><br/>County: <span className="field">{field(doc.propertyCounty)}</span></p></div>
-                                <div className="section"><p className="section-title">3. TERM:</p><p>From <span className="field">{field(doc.commencementDate)}</span> to <span className="field">{field(doc.expirationDate)}</span></p></div>
-                                <div className="section"><p className="section-title">5. RENT:</p><p>Monthly: <span className="field">${field(doc.monthlyRent)}</span></p></div>
-                                <div className="section"><p className="section-title">10. SECURITY DEPOSIT:</p><p>Amount: <span className="field">${field(doc.securityDeposit)}</span></p></div>
-                                {doc.specialProvisions && <div className="section"><p className="section-title">26. SPECIAL PROVISIONS:</p><p>{doc.specialProvisions}</p></div>}
-                                <div className="section" style={{marginTop:'2rem'}}>
-                                    <p className="section-title">SIGNATURES:</p>
+                            {tab === 'preview' && <div className="doc-preview" style={{maxHeight:'600px'}}>
+                                <div style={{borderBottom:'2px solid #000',paddingBottom:'1rem',marginBottom:'1rem'}}>
+                                    <h1 style={{marginBottom:'0.25rem'}}>RESIDENTIAL LEASE AGREEMENT</h1>
+                                    <p className="subtitle">Texas Residential Lease Agreement</p>
+                                </div>
+
+                                <div className="section"><p className="section-title">1. PARTIES TO THIS LEASE</p>
+                                    <p>This Residential Lease Agreement ("Lease") is entered into between:</p>
+                                    <p style={{marginLeft:'1rem'}}><strong>LANDLORD:</strong> <span className="field">{field(doc.landlordName)}</span></p>
+                                    <p style={{marginLeft:'1rem'}}><strong>TENANT(S):</strong> <span className="field">{field(doc.tenantName)}</span>{doc.additionalOccupants && <>, and {doc.additionalOccupants}</>}</p>
+                                </div>
+
+                                <div className="section"><p className="section-title">2. LEASED PREMISES</p>
+                                    <p>Landlord leases to Tenant the real property and improvements described below (collectively referred to as the "Property"):</p>
+                                    <p style={{marginLeft:'1rem'}}><strong>Address:</strong> <span className="field">{field(doc.propertyAddress)}</span></p>
+                                    <p style={{marginLeft:'1rem'}}><strong>City/State/ZIP:</strong> <span className="field">{field(doc.propertyCity)}, Texas {doc.propertyZip}</span></p>
+                                    <p style={{marginLeft:'1rem'}}><strong>County:</strong> <span className="field">{field(doc.propertyCounty)}</span></p>
+                                    {doc.legalDescription && <p style={{marginLeft:'1rem'}}><strong>Legal Description:</strong> <span className="field">{doc.legalDescription}</span></p>}
+                                    {(doc.bedrooms || doc.bathrooms || doc.squareFeet) && <p style={{marginLeft:'1rem'}}><strong>Property Details:</strong> {doc.bedrooms && `${doc.bedrooms} Bedrooms`}{doc.bathrooms && `, ${doc.bathrooms} Bathrooms`}{doc.squareFeet && `, ${doc.squareFeet} sq ft`}</p>}
+                                </div>
+
+                                <div className="section"><p className="section-title">3. LEASE TERM</p>
+                                    <p style={{marginLeft:'1rem'}}><strong>Commencement Date:</strong> <span className="field">{field(doc.commencementDate)}</span></p>
+                                    <p style={{marginLeft:'1rem'}}><strong>Expiration Date:</strong> <span className="field">{field(doc.expirationDate)}</span> at 11:59 p.m.</p>
+                                    <p style={{marginTop:'0.5rem',fontSize:'9pt',fontStyle:'italic'}}>This lease automatically renews on a month-to-month basis unless either party provides {doc.terminationNoticeDays || 30} days written notice of termination.</p>
+                                </div>
+
+                                <div className="section"><p className="section-title">4. RENT</p>
+                                    <p style={{marginLeft:'1rem'}}><strong>Monthly Rent:</strong> <span className="field">${field(doc.monthlyRent)}</span> due on or before the 1st day of each month</p>
+                                    {doc.proratedRent && <p style={{marginLeft:'1rem'}}><strong>Prorated Rent:</strong> ${doc.proratedRent} due on {doc.proratedDueDate}</p>}
+                                    <p style={{marginLeft:'1rem'}}><strong>Payment To:</strong> <span className="field">{field(doc.paymentName || doc.landlordName)}</span></p>
+                                    {doc.paymentAddress && <p style={{marginLeft:'1rem'}}><strong>Payment Address:</strong> {doc.paymentAddress}</p>}
+                                </div>
+
+                                <div className="section"><p className="section-title">5. LATE CHARGES</p>
+                                    <p>If rent is not received by the {doc.gracePeriodDay || 3}rd day of the month at 11:59 p.m., Tenant shall pay:</p>
+                                    <p style={{marginLeft:'1rem'}}>• Initial late charge: <span className="field">${doc.initialLateFee || 50}</span></p>
+                                    <p style={{marginLeft:'1rem'}}>• Additional daily charge: <span className="field">${doc.dailyLateFee || 25}</span> per day until paid in full</p>
+                                    <p style={{marginLeft:'1rem'}}>• Returned payment fee: <span className="field">${doc.returnedPaymentFee || 75}</span></p>
+                                </div>
+
+                                <div className="section"><p className="section-title">6. SECURITY DEPOSIT</p>
+                                    <p style={{marginLeft:'1rem'}}><strong>Amount:</strong> <span className="field">${field(doc.securityDeposit)}</span></p>
+                                    <p style={{marginTop:'0.5rem',fontSize:'9pt'}}>Security deposit will be returned within 30 days after Tenant surrenders the Property, less any lawful deductions for unpaid rent, damages beyond normal wear and tear, and other charges permitted by Texas Property Code §92.103-92.109.</p>
+                                </div>
+
+                                <div className="section"><p className="section-title">7. UTILITIES</p>
+                                    {doc.utilitiesTenant?.length > 0 && <p style={{marginLeft:'1rem'}}><strong>Tenant pays:</strong> {doc.utilitiesTenant.join(', ')}</p>}
+                                    {doc.utilitiesLandlord?.length > 0 && <p style={{marginLeft:'1rem'}}><strong>Landlord pays:</strong> {doc.utilitiesLandlord.join(', ')}</p>}
+                                    {!doc.utilitiesTenant?.length && !doc.utilitiesLandlord?.length && <p style={{marginLeft:'1rem'}}>Tenant pays all utilities.</p>}
+                                </div>
+
+                                <div className="section"><p className="section-title">8. ANIMALS</p>
+                                    <p style={{marginLeft:'1rem'}}>{doc.petsAllowed ? <>Pets are <strong>PERMITTED</strong> subject to: {doc.allowedPets || 'landlord approval'}{doc.petDeposit && `. Pet deposit: $${doc.petDeposit}`}{doc.petRent && `. Monthly pet rent: $${doc.petRent}`}</> : <>Pets are <strong>NOT PERMITTED</strong> without prior written consent of Landlord.</>}</p>
+                                </div>
+
+                                <div className="section"><p className="section-title">9. SMOKING</p>
+                                    <p style={{marginLeft:'1rem'}}>Smoking is <strong>{doc.smokingAllowed ? 'PERMITTED' : 'PROHIBITED'}</strong> {!doc.smokingAllowed && 'inside the Property and within 25 feet of any entrance'}.</p>
+                                </div>
+
+                                <div className="section"><p className="section-title">10. ACCESS BY LANDLORD</p>
+                                    <p style={{marginLeft:'1rem'}}>Landlord may enter the Property at reasonable times with {doc.accessNoticeHours || 24} hours advance notice, except in emergencies.</p>
+                                </div>
+
+                                {doc.hoaName && <div className="section"><p className="section-title">11. HOMEOWNERS ASSOCIATION</p>
+                                    <p style={{marginLeft:'1rem'}}>Property is subject to: <span className="field">{doc.hoaName}</span>. Tenant agrees to comply with all HOA rules and regulations.</p>
+                                </div>}
+
+                                {doc.specialProvisions && <div className="section"><p className="section-title">SPECIAL PROVISIONS</p><p style={{marginLeft:'1rem',whiteSpace:'pre-wrap'}}>{doc.specialProvisions}</p></div>}
+
+                                <div className="section" style={{marginTop:'1.5rem',borderTop:'1px solid #ccc',paddingTop:'1rem'}}>
+                                    <p className="section-title">AGREEMENT</p>
+                                    <p style={{fontSize:'9pt'}}>This Lease is the entire agreement between Landlord and Tenant. No oral agreements have been made. This Lease is binding upon and inures to the benefit of the parties and their respective heirs, executors, administrators, successors, and permitted assigns. This Lease shall be governed by and construed in accordance with the laws of the State of Texas.</p>
+                                </div>
+
+                                <div className="section" style={{marginTop:'2rem',borderTop:'2px solid #000',paddingTop:'1rem'}}>
+                                    <p className="section-title" style={{textAlign:'center',fontSize:'12pt'}}>EXECUTION</p>
+                                    <p style={{textAlign:'center',fontSize:'9pt',marginBottom:'1.5rem'}}>By signing below, each party acknowledges reading and understanding this Lease and agrees to be bound by its terms.</p>
                                     <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'2rem',marginTop:'1rem'}}>
-                                        <div><p><strong>Landlord:</strong></p>{doc.landlordSignature ? <><img src={doc.landlordSignature} className="signature-image" alt="Landlord Signature"/><p style={{fontSize:'9pt',color:'#666'}}>Signed: {new Date(doc.landlordSignedAt).toLocaleString()}</p></> : <div style={{height:'60px',borderBottom:'1px solid #000',marginTop:'0.5rem'}}/>}<p>{doc.landlordName}</p></div>
-                                        <div><p><strong>Tenant:</strong></p>{doc.tenantSignature ? <><img src={doc.tenantSignature} className="signature-image" alt="Tenant Signature"/><p style={{fontSize:'9pt',color:'#666'}}>Signed: {new Date(doc.tenantSignedAt).toLocaleString()}</p></> : <div style={{height:'60px',borderBottom:'1px solid #000',marginTop:'0.5rem'}}/>}<p>{doc.tenantName}</p></div>
+                                        <div style={{borderRight:'1px solid #ccc',paddingRight:'1rem'}}>
+                                            <p><strong>LANDLORD:</strong></p>
+                                            {doc.landlordSignature ? <>
+                                                <img src={doc.landlordSignature} className="signature-image" alt="Landlord Signature" style={{maxHeight:'60px',marginTop:'0.5rem'}}/>
+                                                <p style={{fontSize:'8pt',color:'#666',marginTop:'0.25rem'}}>Electronically signed: {new Date(doc.landlordSignedAt).toLocaleString()}</p>
+                                                <p style={{fontSize:'8pt',color:'#666'}}>IP: {doc.landlordSignedIp}</p>
+                                            </> : <div style={{height:'60px',borderBottom:'1px solid #000',marginTop:'0.5rem'}}/>}
+                                            <p style={{marginTop:'0.5rem'}}>{doc.landlordName}</p>
+                                            {doc.landlordEmail && <p style={{fontSize:'8pt',color:'#666'}}>{doc.landlordEmail}</p>}
+                                        </div>
+                                        <div>
+                                            <p><strong>TENANT:</strong></p>
+                                            {doc.tenantSignature ? <>
+                                                <img src={doc.tenantSignature} className="signature-image" alt="Tenant Signature" style={{maxHeight:'60px',marginTop:'0.5rem'}}/>
+                                                <p style={{fontSize:'8pt',color:'#666',marginTop:'0.25rem'}}>Electronically signed: {new Date(doc.tenantSignedAt).toLocaleString()}</p>
+                                                <p style={{fontSize:'8pt',color:'#666'}}>IP: {doc.tenantSignedIp}</p>
+                                            </> : <div style={{height:'60px',borderBottom:'1px solid #000',marginTop:'0.5rem'}}/>}
+                                            <p style={{marginTop:'0.5rem'}}>{doc.tenantName}</p>
+                                            {doc.tenantEmail && <p style={{fontSize:'8pt',color:'#666'}}>{doc.tenantEmail}</p>}
+                                        </div>
                                     </div>
+                                </div>
+
+                                <div style={{marginTop:'2rem',padding:'1rem',background:'#f5f5f5',borderRadius:'4px',fontSize:'8pt',textAlign:'center',color:'#666'}}>
+                                    <strong>CERTIFICATE OF ELECTRONIC SIGNING</strong><br/>
+                                    This document was signed electronically via LeaseSign. Electronic signatures are legally binding under the ESIGN Act (15 U.S.C. § 7001) and UETA.<br/>
+                                    Document ID: {doc.id}<br/>
+                                    Status: {doc.status === 'completed' ? 'FULLY EXECUTED' : 'PENDING SIGNATURES'}
                                 </div>
                             </div>}
 
-                            {tab === 'details' && <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit, minmax(200px, 1fr))',gap:'1rem'}}>
-                                <div><strong>Landlord:</strong> {doc.landlordName}</div>
-                                <div><strong>Landlord Email:</strong> {doc.landlordEmail}</div>
-                                <div><strong>Tenant:</strong> {doc.tenantName}</div>
-                                <div><strong>Tenant Email:</strong> {doc.tenantEmail}</div>
-                                <div><strong>Property:</strong> {doc.propertyAddress}</div>
-                                <div><strong>City/State:</strong> {doc.propertyCity}, TX {doc.propertyZip}</div>
-                                <div><strong>County:</strong> {doc.propertyCounty}</div>
-                                <div><strong>Monthly Rent:</strong> ${doc.monthlyRent}</div>
-                                <div><strong>Security Deposit:</strong> ${doc.securityDeposit}</div>
-                                <div><strong>Lease Start:</strong> {doc.commencementDate}</div>
-                                <div><strong>Lease End:</strong> {doc.expirationDate}</div>
-                                <div><strong>Grace Period:</strong> Day {doc.gracePeriodDay}</div>
-                                <div><strong>Initial Late Fee:</strong> ${doc.initialLateFee}</div>
-                                <div><strong>Daily Late Fee:</strong> ${doc.dailyLateFee}</div>
+                            {tab === 'details' && <div>
+                                <div style={{marginBottom:'1.5rem'}}>
+                                    <h4 style={{color:'var(--gray-500)',fontSize:'0.75rem',fontWeight:600,textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:'0.75rem',borderBottom:'1px solid var(--gray-200)',paddingBottom:'0.5rem'}}>Parties</h4>
+                                    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit, minmax(200px, 1fr))',gap:'0.75rem'}}>
+                                        <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Landlord</span><br/><strong>{doc.landlordName}</strong></div>
+                                        <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Landlord Email</span><br/>{doc.landlordEmail}</div>
+                                        <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Landlord Phone</span><br/>{doc.landlordPhone || 'N/A'}</div>
+                                        <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Tenant</span><br/><strong>{doc.tenantName}</strong></div>
+                                        <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Tenant Email</span><br/>{doc.tenantEmail}</div>
+                                        <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Tenant Phone</span><br/>{doc.tenantPhone || 'N/A'}</div>
+                                        {doc.additionalOccupants && <div style={{gridColumn:'1/-1'}}><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Additional Occupants</span><br/>{doc.additionalOccupants}</div>}
+                                    </div>
+                                </div>
+                                <div style={{marginBottom:'1.5rem'}}>
+                                    <h4 style={{color:'var(--gray-500)',fontSize:'0.75rem',fontWeight:600,textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:'0.75rem',borderBottom:'1px solid var(--gray-200)',paddingBottom:'0.5rem'}}>Property</h4>
+                                    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit, minmax(200px, 1fr))',gap:'0.75rem'}}>
+                                        <div style={{gridColumn:'1/-1'}}><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Address</span><br/><strong>{doc.propertyAddress}</strong></div>
+                                        <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>City/State</span><br/>{doc.propertyCity}, TX {doc.propertyZip}</div>
+                                        <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>County</span><br/>{doc.propertyCounty}</div>
+                                        {doc.propertyType && <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Property Type</span><br/>{doc.propertyType}</div>}
+                                        {doc.bedrooms && <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Bedrooms</span><br/>{doc.bedrooms}</div>}
+                                        {doc.bathrooms && <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Bathrooms</span><br/>{doc.bathrooms}</div>}
+                                        {doc.squareFeet && <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Square Feet</span><br/>{doc.squareFeet}</div>}
+                                        {doc.legalDescription && <div style={{gridColumn:'1/-1'}}><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Legal Description</span><br/>{doc.legalDescription}</div>}
+                                    </div>
+                                </div>
+                                <div style={{marginBottom:'1.5rem'}}>
+                                    <h4 style={{color:'var(--gray-500)',fontSize:'0.75rem',fontWeight:600,textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:'0.75rem',borderBottom:'1px solid var(--gray-200)',paddingBottom:'0.5rem'}}>Lease Terms</h4>
+                                    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit, minmax(200px, 1fr))',gap:'0.75rem'}}>
+                                        <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Start Date</span><br/><strong>{doc.commencementDate}</strong></div>
+                                        <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>End Date</span><br/><strong>{doc.expirationDate}</strong></div>
+                                        <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Termination Notice</span><br/>{doc.terminationNoticeDays || 30} days</div>
+                                        <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Access Notice</span><br/>{doc.accessNoticeHours || 24} hours</div>
+                                    </div>
+                                </div>
+                                <div style={{marginBottom:'1.5rem'}}>
+                                    <h4 style={{color:'var(--gray-500)',fontSize:'0.75rem',fontWeight:600,textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:'0.75rem',borderBottom:'1px solid var(--gray-200)',paddingBottom:'0.5rem'}}>Financial Terms</h4>
+                                    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit, minmax(150px, 1fr))',gap:'0.75rem'}}>
+                                        <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Monthly Rent</span><br/><strong style={{fontSize:'1.25rem',color:'var(--primary)'}}>${doc.monthlyRent}</strong></div>
+                                        <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Security Deposit</span><br/><strong>${doc.securityDeposit}</strong></div>
+                                        {doc.proratedRent && <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Prorated Rent</span><br/>${doc.proratedRent}</div>}
+                                        <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Grace Period</span><br/>Day {doc.gracePeriodDay || 3}</div>
+                                        <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Initial Late Fee</span><br/>${doc.initialLateFee || 50}</div>
+                                        <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Daily Late Fee</span><br/>${doc.dailyLateFee || 25}</div>
+                                        <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Returned Payment Fee</span><br/>${doc.returnedPaymentFee || 75}</div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <h4 style={{color:'var(--gray-500)',fontSize:'0.75rem',fontWeight:600,textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:'0.75rem',borderBottom:'1px solid var(--gray-200)',paddingBottom:'0.5rem'}}>Rules & Policies</h4>
+                                    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit, minmax(200px, 1fr))',gap:'0.75rem'}}>
+                                        <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Pets</span><br/>{doc.petsAllowed ? `Allowed: ${doc.allowedPets || 'With approval'}` : 'Not Allowed'}</div>
+                                        <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Smoking</span><br/>{doc.smokingAllowed ? 'Permitted' : 'Not Permitted'}</div>
+                                        {doc.utilitiesTenant?.length > 0 && <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Tenant Pays</span><br/>{doc.utilitiesTenant.join(', ')}</div>}
+                                        {doc.hoaName && <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>HOA</span><br/>{doc.hoaName}</div>}
+                                    </div>
+                                </div>
                             </div>}
 
                             {tab === 'audit' && <div>
@@ -951,12 +1216,14 @@
             const [error, setError] = useState(null);
             const [signing, setSigning] = useState(false);
             const [done, setDone] = useState(false);
+            const [agreed, setAgreed] = useState(false);
 
             useEffect(() => {
                 fetch(`/api/sign/${token}`).then(r => r.json()).then(d => { if (d.error) throw new Error(d.error); setData(d); }).catch(e => setError(e.message)).finally(() => setLoading(false));
             }, [token]);
 
             const submit = async (sig) => {
+                if (!agreed) { alert('Please agree to the terms before signing.'); return; }
                 setSigning(true);
                 try {
                     const res = await fetch(`/api/sign/${token}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ signature: sig }) });
@@ -967,33 +1234,173 @@
                 finally { setSigning(false); }
             };
 
-            if (loading) return <div className="auth-container"><div className="auth-card" style={{textAlign:'center'}}>Loading...</div></div>;
-            if (error) return <div className="auth-container"><div className="auth-card" style={{textAlign:'center'}}><div style={{fontSize:'3rem',marginBottom:'1rem'}}>⚠️</div><h2>Error</h2><p style={{color:'var(--gray-500)'}}>{error}</p></div></div>;
-            if (done) return <div className="auth-container"><div className="auth-card" style={{textAlign:'center'}}><div style={{fontSize:'3rem',marginBottom:'1rem'}}>✅</div><h2>Signed Successfully!</h2><p style={{color:'var(--gray-500)'}}>You'll receive a copy via email once all parties have signed.</p></div></div>;
+            if (loading) return <div className="auth-container"><div className="auth-card" style={{textAlign:'center'}}><div style={{fontSize:'2rem',marginBottom:'1rem'}}>⏳</div><h2>Loading Document...</h2><p style={{color:'var(--gray-500)'}}>Please wait while we retrieve your lease agreement.</p></div></div>;
+            if (error) return <div className="auth-container"><div className="auth-card" style={{textAlign:'center'}}><div style={{fontSize:'3rem',marginBottom:'1rem'}}>⚠️</div><h2>Error</h2><p style={{color:'var(--gray-500)'}}>{error}</p><p style={{color:'var(--gray-400)',fontSize:'0.875rem',marginTop:'1rem'}}>If you believe this is an error, please contact the sender.</p></div></div>;
+            if (done) return <div className="auth-container"><div className="auth-card" style={{textAlign:'center'}}><div style={{fontSize:'3rem',marginBottom:'1rem'}}>✅</div><h2>Document Signed Successfully!</h2><p style={{color:'var(--gray-500)',marginBottom:'1rem'}}>Thank you for signing. You will receive a copy of the fully executed lease via email once all parties have signed.</p><div style={{background:'var(--gray-50)',padding:'1rem',borderRadius:'8px',fontSize:'0.875rem',color:'var(--gray-600)'}}><strong>What happens next?</strong><br/>The other party will be notified to sign. Once complete, all parties will receive the final executed document.</div></div></div>;
 
             const { document: doc, signerType } = data;
             const signerName = signerType === 'landlord' ? doc.landlordName : doc.tenantName;
+            const signerEmail = signerType === 'landlord' ? doc.landlordEmail : doc.tenantEmail;
             const field = v => v || '____________';
 
             return <div style={{background:'var(--gray-100)',minHeight:'100vh'}}>
-                <nav className="top-nav"><div className="logo"><div className="logo-icon">📝</div>LeaseSign</div><span style={{color:'var(--gray-500)'}}>Signing as: {signerName}</span></nav>
-                <div className="signing-container">
-                    <div className="signing-header"><h2 style={{fontFamily:"'DM Sans',sans-serif",fontWeight:700}}>🖊️ Review & Sign</h2><p style={{color:'var(--gray-500)'}}>{doc.propertyAddress}</p></div>
-                    <div className="card">
-                        <div className="card-header"><span className="card-title">Residential Lease Agreement</span></div>
-                        <div className="card-body">
-                            <div className="doc-preview" style={{maxHeight:'400px'}}>
-                                <h1>RESIDENTIAL LEASE</h1>
-                                <p className="subtitle">Texas Association of REALTORS® Form</p>
-                                <div className="section"><p className="section-title">1. PARTIES:</p><p>Landlord: <span className="field">{field(doc.landlordName)}</span> | Tenant: <span className="field">{field(doc.tenantName)}</span></p></div>
-                                <div className="section"><p className="section-title">2. PROPERTY:</p><p><span className="field">{field(doc.propertyAddress)}</span>, {doc.propertyCounty} County, TX</p></div>
-                                <div className="section"><p className="section-title">3. TERM:</p><p>From <span className="field">{field(doc.commencementDate)}</span> to <span className="field">{field(doc.expirationDate)}</span></p></div>
-                                <div className="section"><p className="section-title">5. RENT:</p><p>Monthly: <span className="field">${field(doc.monthlyRent)}</span></p></div>
-                                <div className="section"><p className="section-title">10. SECURITY DEPOSIT:</p><p><span className="field">${field(doc.securityDeposit)}</span></p></div>
-                            </div>
-                            <SignaturePad signerName={signerName} onComplete={submit}/>
-                            {signing && <p style={{textAlign:'center',color:'var(--gray-500)'}}>Submitting...</p>}
+                <nav className="top-nav">
+                    <div className="logo"><div className="logo-icon">📝</div>LeaseSign</div>
+                    <div style={{display:'flex',alignItems:'center',gap:'1rem'}}>
+                        <span style={{color:'var(--gray-500)',fontSize:'0.875rem'}}>Signing as:</span>
+                        <span style={{fontWeight:600}}>{signerName}</span>
+                    </div>
+                </nav>
+                <div className="signing-container" style={{maxWidth:'1000px'}}>
+                    <div className="signing-header" style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:'1rem'}}>
+                        <div>
+                            <h2 style={{fontFamily:"'DM Sans',sans-serif",fontWeight:700,marginBottom:'0.25rem'}}>Residential Lease Agreement</h2>
+                            <p style={{color:'var(--gray-500)'}}>{doc.propertyAddress}, {doc.propertyCity}, TX {doc.propertyZip}</p>
                         </div>
+                        <div style={{textAlign:'right'}}>
+                            <span className="status-badge status-pending"><span className="status-dot"></span>Action Required</span>
+                        </div>
+                    </div>
+
+                    <div className="alert alert-info" style={{marginBottom:'1.5rem'}}>
+                        <span className="alert-icon">ℹ️</span>
+                        <div>
+                            <strong>Please review this document carefully</strong><br/>
+                            Scroll through the entire lease agreement below, then sign at the bottom to confirm your agreement.
+                        </div>
+                    </div>
+
+                    <div className="card" style={{marginBottom:'1.5rem'}}>
+                        <div className="card-header" style={{background:'var(--gray-50)'}}>
+                            <span className="card-title">RESIDENTIAL LEASE AGREEMENT - COMPLETE DOCUMENT</span>
+                        </div>
+                        <div className="card-body" style={{padding:0}}>
+                            <div className="doc-preview" style={{maxHeight:'500px',margin:0,border:'none',borderRadius:0}}>
+                                <div style={{borderBottom:'2px solid #000',paddingBottom:'1rem',marginBottom:'1rem'}}>
+                                    <h1 style={{marginBottom:'0.25rem'}}>RESIDENTIAL LEASE AGREEMENT</h1>
+                                    <p className="subtitle">Texas Residential Lease Agreement</p>
+                                </div>
+
+                                <div className="section"><p className="section-title">1. PARTIES TO THIS LEASE</p>
+                                    <p>This Residential Lease Agreement ("Lease") is entered into between:</p>
+                                    <p style={{marginLeft:'1rem'}}><strong>LANDLORD:</strong> <span className="field">{field(doc.landlordName)}</span></p>
+                                    <p style={{marginLeft:'1rem'}}><strong>TENANT(S):</strong> <span className="field">{field(doc.tenantName)}</span>{doc.additionalOccupants && <>, and {doc.additionalOccupants}</>}</p>
+                                </div>
+
+                                <div className="section"><p className="section-title">2. LEASED PREMISES</p>
+                                    <p>Landlord leases to Tenant the real property and all improvements located at:</p>
+                                    <p style={{marginLeft:'1rem'}}><strong>Address:</strong> <span className="field">{field(doc.propertyAddress)}</span></p>
+                                    <p style={{marginLeft:'1rem'}}><strong>City/State/ZIP:</strong> <span className="field">{field(doc.propertyCity)}, Texas {doc.propertyZip}</span></p>
+                                    <p style={{marginLeft:'1rem'}}><strong>County:</strong> <span className="field">{field(doc.propertyCounty)}</span></p>
+                                    {doc.legalDescription && <p style={{marginLeft:'1rem'}}><strong>Legal Description:</strong> <span className="field">{doc.legalDescription}</span></p>}
+                                    {(doc.bedrooms || doc.bathrooms) && <p style={{marginLeft:'1rem'}}><strong>Property:</strong> {doc.bedrooms && `${doc.bedrooms} Bed`}{doc.bathrooms && ` / ${doc.bathrooms} Bath`}{doc.squareFeet && ` / ${doc.squareFeet} sq ft`}</p>}
+                                </div>
+
+                                <div className="section"><p className="section-title">3. LEASE TERM</p>
+                                    <p style={{marginLeft:'1rem'}}><strong>Commencement Date:</strong> <span className="field">{field(doc.commencementDate)}</span></p>
+                                    <p style={{marginLeft:'1rem'}}><strong>Expiration Date:</strong> <span className="field">{field(doc.expirationDate)}</span> at 11:59 p.m.</p>
+                                    <p style={{marginTop:'0.5rem',fontSize:'9pt'}}>This lease automatically renews on a month-to-month basis unless either party provides {doc.terminationNoticeDays || 30} days written notice of termination before the Expiration Date.</p>
+                                </div>
+
+                                <div className="section"><p className="section-title">4. RENT AND PAYMENTS</p>
+                                    <p style={{marginLeft:'1rem'}}><strong>Monthly Rent:</strong> <span className="field">${field(doc.monthlyRent)}</span> due on or before the 1st day of each month</p>
+                                    {doc.proratedRent && <p style={{marginLeft:'1rem'}}><strong>Prorated Rent:</strong> ${doc.proratedRent} due on {doc.proratedDueDate}</p>}
+                                    <p style={{marginLeft:'1rem'}}><strong>Make Payments To:</strong> <span className="field">{field(doc.paymentName || doc.landlordName)}</span></p>
+                                    {doc.paymentAddress && <p style={{marginLeft:'1rem'}}><strong>Payment Address:</strong> {doc.paymentAddress}</p>}
+                                </div>
+
+                                <div className="section"><p className="section-title">5. LATE CHARGES</p>
+                                    <p>If rent is not received by the {doc.gracePeriodDay || 3}rd day of the month at 11:59 p.m., Tenant shall pay:</p>
+                                    <p style={{marginLeft:'1rem'}}>• Initial late charge: <span className="field">${doc.initialLateFee || 50}</span></p>
+                                    <p style={{marginLeft:'1rem'}}>• Additional daily charge: <span className="field">${doc.dailyLateFee || 25}</span> per day until paid</p>
+                                    <p style={{marginLeft:'1rem'}}>• Returned payment fee: <span className="field">${doc.returnedPaymentFee || 75}</span> per occurrence</p>
+                                </div>
+
+                                <div className="section"><p className="section-title">6. SECURITY DEPOSIT</p>
+                                    <p style={{marginLeft:'1rem'}}><strong>Amount:</strong> <span className="field">${field(doc.securityDeposit)}</span></p>
+                                    <p style={{fontSize:'9pt',marginTop:'0.5rem'}}>Security deposit will be returned within 30 days after Tenant surrenders the Property in accordance with this Lease, less any lawful deductions for: unpaid rent, late fees, unpaid utilities, cost of repairs beyond normal wear and tear, cleaning, key replacement, and other charges permitted under Texas Property Code §92.103-92.109.</p>
+                                </div>
+
+                                <div className="section"><p className="section-title">7. UTILITIES</p>
+                                    {doc.utilitiesTenant?.length > 0 && <p style={{marginLeft:'1rem'}}><strong>Tenant Pays:</strong> {doc.utilitiesTenant.map(u => u.charAt(0).toUpperCase() + u.slice(1)).join(', ')}</p>}
+                                    {doc.utilitiesLandlord?.length > 0 && <p style={{marginLeft:'1rem'}}><strong>Landlord Pays:</strong> {doc.utilitiesLandlord.map(u => u.charAt(0).toUpperCase() + u.slice(1)).join(', ')}</p>}
+                                    {!doc.utilitiesTenant?.length && !doc.utilitiesLandlord?.length && <p style={{marginLeft:'1rem'}}>Tenant shall pay all utilities.</p>}
+                                </div>
+
+                                <div className="section"><p className="section-title">8. ANIMALS</p>
+                                    <p style={{marginLeft:'1rem'}}>{doc.petsAllowed ? <>Pets <strong>ARE PERMITTED</strong> subject to: {doc.allowedPets || 'prior landlord approval'}.{doc.petDeposit && ` Pet deposit: $${doc.petDeposit}.`}{doc.petRent && ` Monthly pet rent: $${doc.petRent}.`}</> : <>Pets <strong>ARE NOT PERMITTED</strong> without prior written consent of Landlord. Unauthorized animals may result in lease termination and/or additional charges.</>}</p>
+                                </div>
+
+                                <div className="section"><p className="section-title">9. SMOKING</p>
+                                    <p style={{marginLeft:'1rem'}}>Smoking is <strong>{doc.smokingAllowed ? 'PERMITTED' : 'STRICTLY PROHIBITED'}</strong> {!doc.smokingAllowed && 'inside the Property and within 25 feet of any entrance, window, or ventilation system'}.</p>
+                                </div>
+
+                                <div className="section"><p className="section-title">10. PARKING</p>
+                                    <p style={{marginLeft:'1rem'}}>Maximum of {doc.parkingSpaces || 4} vehicles permitted. All vehicles must be operable with current registration. No commercial vehicles, trailers, boats, or recreational vehicles without prior written consent.</p>
+                                </div>
+
+                                <div className="section"><p className="section-title">11. ACCESS BY LANDLORD</p>
+                                    <p style={{marginLeft:'1rem'}}>Landlord may enter the Property at reasonable times with {doc.accessNoticeHours || 24} hours advance notice for: inspections, repairs, showings to prospective tenants or buyers, or any other lawful purpose. In case of emergency, Landlord may enter without notice.</p>
+                                </div>
+
+                                {doc.hoaName && <div className="section"><p className="section-title">12. HOMEOWNERS ASSOCIATION</p>
+                                    <p style={{marginLeft:'1rem'}}>The Property is subject to <span className="field">{doc.hoaName}</span>. Tenant agrees to comply with all HOA rules, regulations, and CC&Rs. Violations may result in fines which will be Tenant's responsibility.</p>
+                                </div>}
+
+                                <div className="section"><p className="section-title">13. MAINTENANCE AND REPAIRS</p>
+                                    <p style={{marginLeft:'1rem'}}>Tenant shall keep the Property clean and sanitary, dispose of garbage properly, and promptly notify Landlord of any needed repairs or dangerous conditions. Tenant is responsible for repairs caused by Tenant, occupants, or guests.</p>
+                                </div>
+
+                                <div className="section"><p className="section-title">14. DEFAULT AND REMEDIES</p>
+                                    <p style={{fontSize:'9pt'}}>Tenant default includes: nonpayment of rent, abandonment, material lease violations, or false statements in rental application. Upon default, Landlord may terminate this Lease, accelerate all remaining rent, pursue eviction, and seek damages and attorney's fees.</p>
+                                </div>
+
+                                {doc.specialProvisions && <div className="section"><p className="section-title">SPECIAL PROVISIONS</p><p style={{marginLeft:'1rem',whiteSpace:'pre-wrap'}}>{doc.specialProvisions}</p></div>}
+
+                                <div className="section" style={{marginTop:'1.5rem',padding:'1rem',background:'#f9f9f9',border:'1px solid #ddd'}}>
+                                    <p className="section-title">AGREEMENT OF PARTIES</p>
+                                    <p style={{fontSize:'9pt'}}>This Lease constitutes the entire agreement between the parties. No oral agreements or representations have been made. This Lease is binding upon and inures to the benefit of the parties and their respective heirs, executors, administrators, successors, and permitted assigns. All parties signing this Lease are jointly and severally liable for all obligations hereunder. This Lease shall be governed by and construed in accordance with the laws of the State of Texas.</p>
+                                </div>
+
+                                <div style={{marginTop:'1.5rem',textAlign:'center',fontSize:'8pt',color:'#666'}}>
+                                    <p>Electronic signatures are legally binding under the ESIGN Act (15 U.S.C. § 7001) and Texas UETA.</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="card">
+                        <div className="card-header" style={{background:'var(--primary-50)'}}>
+                            <span className="card-title" style={{color:'var(--primary)'}}>Sign Document</span>
+                        </div>
+                        <div className="card-body">
+                            <div style={{background:'var(--gray-50)',padding:'1rem',borderRadius:'8px',marginBottom:'1.5rem'}}>
+                                <p style={{fontWeight:600,marginBottom:'0.5rem'}}>You are signing as: {signerType === 'landlord' ? 'LANDLORD' : 'TENANT'}</p>
+                                <p style={{fontSize:'0.875rem',color:'var(--gray-600)'}}>Name: {signerName}<br/>Email: {signerEmail}</p>
+                            </div>
+
+                            <div style={{marginBottom:'1.5rem'}}>
+                                <label style={{display:'flex',alignItems:'flex-start',gap:'0.75rem',cursor:'pointer',padding:'1rem',border:'1px solid var(--gray-300)',borderRadius:'8px',background:agreed?'var(--success-light)':'white'}}>
+                                    <input type="checkbox" checked={agreed} onChange={()=>setAgreed(!agreed)} style={{width:'20px',height:'20px',marginTop:'2px',accentColor:'var(--success)'}}/>
+                                    <span style={{fontSize:'0.9rem'}}>
+                                        <strong>I have read and agree to the terms of this Residential Lease Agreement.</strong><br/>
+                                        <span style={{color:'var(--gray-600)',fontSize:'0.8rem'}}>I understand that by signing below, I am entering into a legally binding contract. I confirm that all information provided is accurate and that I have had the opportunity to review this document in its entirety.</span>
+                                    </span>
+                                </label>
+                            </div>
+
+                            {agreed ? <SignaturePad signerName={signerName} onComplete={submit}/> :
+                                <div style={{textAlign:'center',padding:'2rem',background:'var(--gray-50)',borderRadius:'8px',border:'2px dashed var(--gray-300)'}}>
+                                    <p style={{color:'var(--gray-500)'}}>Please check the box above to confirm you have read and agree to the lease terms before signing.</p>
+                                </div>
+                            }
+                            {signing && <p style={{textAlign:'center',color:'var(--gray-500)',marginTop:'1rem'}}>Submitting your signature...</p>}
+                        </div>
+                    </div>
+
+                    <div style={{textAlign:'center',padding:'2rem',color:'var(--gray-500)',fontSize:'0.8rem'}}>
+                        <p>Powered by LeaseSign | Secure Electronic Signatures</p>
+                        <p>Questions? Contact the document sender or visit our help center.</p>
                     </div>
                 </div>
             </div>;
