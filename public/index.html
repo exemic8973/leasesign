@@ -355,6 +355,9 @@
             const [password, setPassword] = useState('');
             const [loading, setLoading] = useState(false);
             const [error, setError] = useState('');
+            const [showForgot, setShowForgot] = useState(false);
+            const [forgotEmail, setForgotEmail] = useState('');
+            const [forgotSent, setForgotSent] = useState(false);
 
             const submit = async (e) => {
                 e.preventDefault();
@@ -367,6 +370,43 @@
                 finally { setLoading(false); }
             };
 
+            const submitForgot = async (e) => {
+                e.preventDefault();
+                setLoading(true); setError('');
+                try {
+                    await api.post('/auth/forgot-password', { email: forgotEmail });
+                    setForgotSent(true);
+                } catch (err) { setError(err.message); }
+                finally { setLoading(false); }
+            };
+
+            if (showForgot) {
+                return (
+                    <div className="auth-container">
+                        <div className="auth-card">
+                            <div className="auth-logo"><div className="logo" style={{justifyContent:'center'}}><div className="logo-icon">📝</div>LeaseSign</div></div>
+                            <h1 className="auth-title">Reset Password</h1>
+                            {forgotSent ? (
+                                <>
+                                    <div className="alert alert-success" style={{marginBottom:'1rem'}}><span className="alert-icon">✅</span>If an account exists with that email, a reset link has been sent.</div>
+                                    <button className="btn btn-secondary" style={{width:'100%'}} onClick={() => { setShowForgot(false); setForgotSent(false); }}>Back to Login</button>
+                                </>
+                            ) : (
+                                <>
+                                    <p className="auth-subtitle">Enter your email and we'll send you a reset link</p>
+                                    {error && <div className="alert alert-danger"><span className="alert-icon">⚠️</span>{error}</div>}
+                                    <form onSubmit={submitForgot}>
+                                        <div className="form-group" style={{marginBottom:'1rem'}}><label>Email</label><input type="email" value={forgotEmail} onChange={e=>setForgotEmail(e.target.value)} required/></div>
+                                        <button type="submit" className="btn btn-primary btn-lg" style={{width:'100%',marginBottom:'1rem'}} disabled={loading}>{loading ? 'Sending...' : 'Send Reset Link'}</button>
+                                    </form>
+                                    <button className="btn btn-secondary" style={{width:'100%'}} onClick={() => setShowForgot(false)}>Back to Login</button>
+                                </>
+                            )}
+                        </div>
+                    </div>
+                );
+            }
+
             return (
                 <div className="auth-container">
                     <div className="auth-card">
@@ -376,7 +416,8 @@
                         {error && <div className="alert alert-danger"><span className="alert-icon">⚠️</span>{error}</div>}
                         <form onSubmit={submit}>
                             <div className="form-group" style={{marginBottom:'1rem'}}><label>Email</label><input type="email" value={email} onChange={e=>setEmail(e.target.value)} required/></div>
-                            <div className="form-group" style={{marginBottom:'1rem'}}><label>Password</label><input type="password" value={password} onChange={e=>setPassword(e.target.value)} required/></div>
+                            <div className="form-group" style={{marginBottom:'0.5rem'}}><label>Password</label><input type="password" value={password} onChange={e=>setPassword(e.target.value)} required/></div>
+                            <div style={{textAlign:'right',marginBottom:'1rem'}}><a style={{fontSize:'0.875rem',color:'var(--primary)',cursor:'pointer'}} onClick={() => setShowForgot(true)}>Forgot password?</a></div>
                             <button type="submit" className="btn btn-primary btn-lg" style={{width:'100%'}} disabled={loading}>{loading ? 'Signing in...' : 'Sign In'}</button>
                         </form>
                         <div className="auth-footer">Don't have an account? <a onClick={onSwitch}>Create one</a></div>
@@ -796,11 +837,32 @@
         function DocDetail({ doc, onBack, onSend, onDownload, onDelete, onRefresh, onDuplicate, onVoid, onResend, onSaveTemplate, onEdit, onRegenerateLink, toast }) {
             const [tab, setTab] = useState('preview');
             const [audit, setAudit] = useState([]);
+            const [comments, setComments] = useState([]);
+            const [newComment, setNewComment] = useState('');
             const [menuOpen, setMenuOpen] = useState(false);
 
             useEffect(() => {
                 api.get(`/documents/${doc.id}/audit`).then(setAudit).catch(() => {});
+                api.get(`/documents/${doc.id}/comments`).then(setComments).catch(() => {});
             }, [doc.id]);
+
+            const addComment = async () => {
+                if (!newComment.trim()) return;
+                try {
+                    const comment = await api.post(`/documents/${doc.id}/comments`, { text: newComment });
+                    setComments([...comments, comment]);
+                    setNewComment('');
+                    toast('Comment added');
+                } catch (e) { toast(e.message, 'error'); }
+            };
+
+            const resolveComment = async (commentId) => {
+                try {
+                    await api.patch(`/documents/${doc.id}/comments/${commentId}/resolve`);
+                    setComments(comments.map(c => c.id === commentId ? { ...c, resolved: true } : c));
+                    toast('Comment resolved');
+                } catch (e) { toast(e.message, 'error'); }
+            };
 
             const field = v => v || '____________';
 
@@ -864,6 +926,7 @@
                             <div className="tabs">
                                 <div className={`tab ${tab==='preview'?'active':''}`} onClick={()=>setTab('preview')}>Preview</div>
                                 <div className={`tab ${tab==='details'?'active':''}`} onClick={()=>setTab('details')}>Details</div>
+                                <div className={`tab ${tab==='comments'?'active':''}`} onClick={()=>setTab('comments')}>Comments {comments.length > 0 && <span style={{background:'var(--primary)',color:'white',borderRadius:'10px',padding:'2px 6px',fontSize:'0.7rem',marginLeft:'4px'}}>{comments.length}</span>}</div>
                                 <div className={`tab ${tab==='audit'?'active':''}`} onClick={()=>setTab('audit')}>Audit Log</div>
                             </div>
 
@@ -1033,6 +1096,41 @@
                                         {doc.hoaName && <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>HOA</span><br/>{doc.hoaName}</div>}
                                     </div>
                                 </div>
+                            </div>}
+
+                            {tab === 'comments' && <div>
+                                <div style={{marginBottom:'1rem'}}>
+                                    <textarea
+                                        placeholder="Add a comment or question..."
+                                        value={newComment}
+                                        onChange={e => setNewComment(e.target.value)}
+                                        rows={3}
+                                        style={{width:'100%',marginBottom:'0.5rem'}}
+                                    />
+                                    <button className="btn btn-primary btn-sm" onClick={addComment} disabled={!newComment.trim()}>Add Comment</button>
+                                </div>
+                                {comments.length === 0 ? (
+                                    <p style={{color:'var(--gray-500)',textAlign:'center',padding:'2rem'}}>No comments yet. Add a comment to start a discussion.</p>
+                                ) : (
+                                    <div style={{display:'flex',flexDirection:'column',gap:'0.75rem'}}>
+                                        {comments.map(c => (
+                                            <div key={c.id} style={{padding:'0.75rem',background:c.resolved ? 'var(--gray-50)' : 'var(--primary-50)',borderRadius:'8px',border:'1px solid ' + (c.resolved ? 'var(--gray-200)' : 'var(--primary-light)'),opacity:c.resolved?0.7:1}}>
+                                                <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:'0.5rem'}}>
+                                                    <div>
+                                                        <span style={{fontWeight:600}}>{c.authorName}</span>
+                                                        {c.signerType && <span style={{fontSize:'0.75rem',color:'var(--gray-500)',marginLeft:'0.5rem'}}>({c.signerType})</span>}
+                                                    </div>
+                                                    <span style={{fontSize:'0.75rem',color:'var(--gray-500)'}}>{new Date(c.createdAt).toLocaleString()}</span>
+                                                </div>
+                                                <p style={{margin:0,color:'var(--gray-700)'}}>{c.text}</p>
+                                                {!c.resolved && (
+                                                    <button className="btn btn-sm" style={{marginTop:'0.5rem',fontSize:'0.75rem'}} onClick={() => resolveComment(c.id)}>Mark Resolved</button>
+                                                )}
+                                                {c.resolved && <span style={{fontSize:'0.75rem',color:'var(--success)',marginTop:'0.5rem',display:'block'}}>✓ Resolved</span>}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
                             </div>}
 
                             {tab === 'audit' && <div>
@@ -1450,9 +1548,76 @@
                                         <div className="stat-card"><div className="stat-icon yellow">⏳</div><div className="stat-label">Awaiting</div><div className="stat-value">{(stats.pending || 0) + (stats.partial || 0)}</div></div>
                                         <div className="stat-card"><div className="stat-icon green">✓</div><div className="stat-label">Completed</div><div className="stat-value">{stats.completed || 0}</div></div>
                                         <div className="stat-card"><div className="stat-icon gray">📝</div><div className="stat-label">Drafts</div><div className="stat-value">{stats.draft || 0}</div></div>
-                                        <div className="stat-card"><div className="stat-icon purple">📋</div><div className="stat-label">Templates</div><div className="stat-value">{templates.length}</div></div>
-                                        <div className="stat-card"><div className="stat-icon red">🚫</div><div className="stat-label">Voided</div><div className="stat-value">{stats.voided || 0}</div></div>
+                                        <div className="stat-card"><div className="stat-icon purple">📊</div><div className="stat-label">Completion</div><div className="stat-value">{stats.completionRate || 0}%</div></div>
+                                        <div className="stat-card"><div className="stat-icon teal">⏱️</div><div className="stat-label">Avg Time</div><div className="stat-value">{stats.avgTimeToComplete ? `${stats.avgTimeToComplete}h` : '-'}</div></div>
                                     </div>
+
+                                    {/* Analytics Row */}
+                                    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit, minmax(300px, 1fr))',gap:'1.5rem',marginBottom:'1.5rem'}}>
+                                        {/* Monthly Trends */}
+                                        <div className="card">
+                                            <div className="card-header"><span className="card-title">📈 Monthly Trends</span></div>
+                                            <div className="card-body">
+                                                {stats.monthlyTrends?.length > 0 ? (
+                                                    <BarChart data={stats.monthlyTrends.map(m => ({ label: m.month, value: m.created, color: 'var(--primary)' }))} height={100}/>
+                                                ) : <div style={{textAlign:'center',color:'var(--gray-400)',padding:'1rem'}}>No data yet</div>}
+                                                <div style={{display:'flex',justifyContent:'center',gap:'1.5rem',marginTop:'0.5rem',fontSize:'0.75rem'}}>
+                                                    <span><span style={{display:'inline-block',width:'10px',height:'10px',background:'var(--primary)',borderRadius:'2px',marginRight:'4px'}}/>Created</span>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* Signing Funnel */}
+                                        <div className="card">
+                                            <div className="card-header"><span className="card-title">🎯 Signing Funnel</span></div>
+                                            <div className="card-body">
+                                                {stats.signingFunnel ? (
+                                                    <div style={{display:'flex',flexDirection:'column',gap:'0.75rem'}}>
+                                                        <div style={{display:'flex',alignItems:'center',gap:'0.75rem'}}>
+                                                            <div style={{width:'100px',fontSize:'0.8rem',color:'var(--gray-600)'}}>Sent</div>
+                                                            <div style={{flex:1,height:'24px',background:'var(--gray-100)',borderRadius:'4px',overflow:'hidden'}}>
+                                                                <div style={{width:'100%',height:'100%',background:'var(--primary)',display:'flex',alignItems:'center',justifyContent:'center',color:'white',fontSize:'0.75rem',fontWeight:600}}>{stats.signingFunnel.totalSent}</div>
+                                                            </div>
+                                                        </div>
+                                                        <div style={{display:'flex',alignItems:'center',gap:'0.75rem'}}>
+                                                            <div style={{width:'100px',fontSize:'0.8rem',color:'var(--gray-600)'}}>Landlord Signed</div>
+                                                            <div style={{flex:1,height:'24px',background:'var(--gray-100)',borderRadius:'4px',overflow:'hidden'}}>
+                                                                <div style={{width:`${stats.signingFunnel.totalSent > 0 ? (stats.signingFunnel.landlordSigned/stats.signingFunnel.totalSent)*100 : 0}%`,height:'100%',background:'#f59e0b',display:'flex',alignItems:'center',justifyContent:'center',color:'white',fontSize:'0.75rem',fontWeight:600}}>{stats.signingFunnel.landlordSigned}</div>
+                                                            </div>
+                                                        </div>
+                                                        <div style={{display:'flex',alignItems:'center',gap:'0.75rem'}}>
+                                                            <div style={{width:'100px',fontSize:'0.8rem',color:'var(--gray-600)'}}>Fully Signed</div>
+                                                            <div style={{flex:1,height:'24px',background:'var(--gray-100)',borderRadius:'4px',overflow:'hidden'}}>
+                                                                <div style={{width:`${stats.signingFunnel.totalSent > 0 ? (stats.signingFunnel.fullySigned/stats.signingFunnel.totalSent)*100 : 0}%`,height:'100%',background:'var(--success)',display:'flex',alignItems:'center',justifyContent:'center',color:'white',fontSize:'0.75rem',fontWeight:600}}>{stats.signingFunnel.fullySigned}</div>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                ) : <div style={{textAlign:'center',color:'var(--gray-400)',padding:'1rem'}}>No data yet</div>}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Recent Activity */}
+                                    {stats.recentActivity?.length > 0 && (
+                                        <div className="card" style={{marginBottom:'1.5rem'}}>
+                                            <div className="card-header"><span className="card-title">🕐 Recent Activity</span></div>
+                                            <div className="card-body" style={{padding:0}}>
+                                                <div className="doc-list">
+                                                    {stats.recentActivity.map(a => (
+                                                        <div key={a.id} className="doc-item" onClick={() => { const d = docs.find(x => x.id === a.id); if (d) { setDoc(d); setView('detail'); }}}>
+                                                            <div className="doc-icon">📋</div>
+                                                            <div className="doc-info">
+                                                                <div className="doc-title">{a.title}</div>
+                                                                <div className="doc-meta">{new Date(a.updatedAt).toLocaleString()}</div>
+                                                            </div>
+                                                            <StatusBadge status={a.status}/>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+
                                     <div className="card" style={{marginBottom:'1.5rem'}}>
                                         <div className="card-header"><span className="card-title"><Icon name="chart" size={16}/> Document Status Overview</span></div>
                                         <div className="card-body">
@@ -1748,6 +1913,62 @@
             </div>;
         }
 
+        // Reset Password Page
+        function ResetPasswordPage({ token }) {
+            const [password, setPassword] = useState('');
+            const [confirm, setConfirm] = useState('');
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState('');
+            const [success, setSuccess] = useState(false);
+            const [validating, setValidating] = useState(true);
+            const [invalid, setInvalid] = useState(false);
+
+            useEffect(() => {
+                fetch(`/api/auth/reset-password/${token}`)
+                    .then(r => { if (!r.ok) throw new Error('Invalid'); return r.json(); })
+                    .then(() => setValidating(false))
+                    .catch(() => { setInvalid(true); setValidating(false); });
+            }, [token]);
+
+            const submit = async (e) => {
+                e.preventDefault();
+                if (password !== confirm) { setError('Passwords do not match'); return; }
+                if (password.length < 6) { setError('Password must be at least 6 characters'); return; }
+                setLoading(true); setError('');
+                try {
+                    const res = await fetch(`/api/auth/reset-password/${token}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ password })
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error);
+                    setSuccess(true);
+                } catch (err) { setError(err.message); }
+                finally { setLoading(false); }
+            };
+
+            if (validating) return <div className="auth-container"><div className="auth-card" style={{textAlign:'center'}}><div style={{fontSize:'2rem',marginBottom:'1rem'}}>⏳</div><h2>Validating link...</h2></div></div>;
+            if (invalid) return <div className="auth-container"><div className="auth-card" style={{textAlign:'center'}}><div style={{fontSize:'3rem',marginBottom:'1rem'}}>❌</div><h2>Invalid or Expired Link</h2><p style={{color:'var(--gray-500)',marginBottom:'1rem'}}>This password reset link is no longer valid.</p><a href="/" className="btn btn-primary">Back to Login</a></div></div>;
+            if (success) return <div className="auth-container"><div className="auth-card" style={{textAlign:'center'}}><div style={{fontSize:'3rem',marginBottom:'1rem'}}>✅</div><h2>Password Reset!</h2><p style={{color:'var(--gray-500)',marginBottom:'1rem'}}>Your password has been successfully reset.</p><a href="/" className="btn btn-primary">Sign In</a></div></div>;
+
+            return (
+                <div className="auth-container">
+                    <div className="auth-card">
+                        <div className="auth-logo"><div className="logo" style={{justifyContent:'center'}}><div className="logo-icon">📝</div>LeaseSign</div></div>
+                        <h1 className="auth-title">Create New Password</h1>
+                        <p className="auth-subtitle">Enter your new password below</p>
+                        {error && <div className="alert alert-danger"><span className="alert-icon">⚠️</span>{error}</div>}
+                        <form onSubmit={submit}>
+                            <div className="form-group" style={{marginBottom:'1rem'}}><label>New Password</label><input type="password" value={password} onChange={e=>setPassword(e.target.value)} required minLength={6}/></div>
+                            <div className="form-group" style={{marginBottom:'1rem'}}><label>Confirm Password</label><input type="password" value={confirm} onChange={e=>setConfirm(e.target.value)} required/></div>
+                            <button type="submit" className="btn btn-primary btn-lg" style={{width:'100%'}} disabled={loading}>{loading ? 'Resetting...' : 'Reset Password'}</button>
+                        </form>
+                    </div>
+                </div>
+            );
+        }
+
         // App
         function App() {
             const [user, setUser] = useState(null);
@@ -1755,9 +1976,10 @@
             const [loading, setLoading] = useState(true);
 
             const signToken = window.location.pathname.match(/^\/sign\/(.+)$/)?.[1];
+            const resetToken = window.location.pathname.match(/^\/reset-password\/(.+)$/)?.[1];
 
             useEffect(() => {
-                if (signToken) { setLoading(false); return; }
+                if (signToken || resetToken) { setLoading(false); return; }
                 const token = localStorage.getItem('leasesign_token');
                 if (token) {
                     api.token = token;
@@ -1766,6 +1988,7 @@
             }, []);
 
             if (loading) return <div className="auth-container"><div>Loading...</div></div>;
+            if (resetToken) return <ResetPasswordPage token={resetToken}/>;
             if (signToken) return <SigningPage token={signToken}/>;
             if (!user) return authView === 'register' ? <RegisterPage onRegister={setUser} onSwitch={() => setAuthView('login')}/> : <LoginPage onLogin={setUser} onSwitch={() => setAuthView('register')}/>;
             return <Dashboard user={user} onLogout={() => setUser(null)}/>;

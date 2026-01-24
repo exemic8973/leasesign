@@ -105,6 +105,8 @@ const usersDB = new Database('users.json');
 const documentsDB = new Database('documents.json');
 const auditDB = new Database('audit.json');
 const notificationsDB = new Database('notifications.json');
+const commentsDB = new Database('comments.json');
+const passwordResetDB = new Database('password-resets.json');
 
 // Link expiration time (7 days in milliseconds)
 const LINK_EXPIRATION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -240,6 +242,42 @@ const createMailer = async () => {
   mailer = await createMailer();
 })();
 
+// SMS Support (Twilio)
+const sendSMS = async (to, message) => {
+  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_PHONE_NUMBER) {
+    console.log('📱 SMS not configured (Twilio credentials missing)');
+    return null;
+  }
+
+  try {
+    const accountSid = process.env.TWILIO_ACCOUNT_SID;
+    const authToken = process.env.TWILIO_AUTH_TOKEN;
+    const fromNumber = process.env.TWILIO_PHONE_NUMBER;
+
+    // Make Twilio API call
+    const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Basic ' + Buffer.from(`${accountSid}:${authToken}`).toString('base64'),
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: new URLSearchParams({ To: to, From: fromNumber, Body: message })
+    });
+
+    const data = await response.json();
+    if (data.sid) {
+      console.log(`📱 SMS sent to ${to}: ${data.sid}`);
+      return data;
+    } else {
+      console.error('📱 SMS failed:', data.message || data);
+      return null;
+    }
+  } catch (err) {
+    console.error('📱 SMS error:', err.message);
+    return null;
+  }
+};
+
 // Auth middleware
 const auth = (req, res, next) => {
   const token = req.headers.authorization?.replace('Bearer ', '');
@@ -326,6 +364,212 @@ app.get('/api/auth/me', auth, (req, res) => {
   res.json(safeUser);
 });
 
+// ==================== PASSWORD RESET ====================
+
+// Request password reset
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email required' });
+
+    const user = usersDB.findOne({ email });
+    // Always return success to prevent email enumeration
+    if (!user) {
+      return res.json({ success: true, message: 'If an account exists, a reset link has been sent.' });
+    }
+
+    // Generate reset token (expires in 1 hour)
+    const resetToken = uuidv4();
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+
+    // Delete any existing reset tokens for this user
+    const existing = passwordResetDB.findAll({ userId: user.id });
+    existing.forEach(r => passwordResetDB.delete(r.id));
+
+    // Create new reset token
+    passwordResetDB.insert({ userId: user.id, token: resetToken, expiresAt });
+
+    // Send reset email
+    const resetUrl = `${APP_URL}/reset-password/${resetToken}`;
+    await mailer.sendMail({
+      from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
+      to: email,
+      subject: 'Reset Your LeaseSign Password',
+      html: `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f3f4f6;">
+  <table width="100%" style="max-width:600px;margin:0 auto;padding:20px;">
+    <tr>
+      <td style="background:linear-gradient(135deg,#4f46e5 0%,#818cf8 100%);padding:40px 30px;text-align:center;border-radius:12px 12px 0 0;">
+        <h1 style="color:white;margin:0;font-size:28px;">🔐 Password Reset</h1>
+      </td>
+    </tr>
+    <tr>
+      <td style="background:white;padding:40px 30px;border:1px solid #e5e7eb;border-top:none;">
+        <h2 style="color:#111827;margin:0 0 20px;">Hello ${user.name},</h2>
+        <p style="color:#4b5563;line-height:1.6;">We received a request to reset your password. Click the button below to create a new password:</p>
+        <table width="100%"><tr><td style="text-align:center;padding:20px 0;">
+          <a href="${resetUrl}" style="display:inline-block;background:#4f46e5;color:white;padding:16px 40px;text-decoration:none;border-radius:8px;font-weight:600;">Reset Password</a>
+        </td></tr></table>
+        <p style="color:#9ca3af;font-size:13px;border-top:1px solid #e5e7eb;padding-top:20px;margin-top:20px;">
+          This link expires in 1 hour. If you didn't request this reset, you can safely ignore this email.
+        </p>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`
+    });
+
+    console.log(`Password reset email sent to ${email}`);
+    res.json({ success: true, message: 'If an account exists, a reset link has been sent.' });
+  } catch (e) {
+    console.error('Forgot password error:', e);
+    res.status(500).json({ error: 'Failed to send reset email' });
+  }
+});
+
+// Verify reset token
+app.get('/api/auth/reset-password/:token', (req, res) => {
+  const reset = passwordResetDB.findOne({ token: req.params.token });
+  if (!reset) return res.status(404).json({ error: 'Invalid or expired reset link' });
+  if (new Date(reset.expiresAt) < new Date()) {
+    passwordResetDB.delete(reset.id);
+    return res.status(410).json({ error: 'Reset link has expired' });
+  }
+  res.json({ valid: true });
+});
+
+// Reset password
+app.post('/api/auth/reset-password/:token', async (req, res) => {
+  try {
+    const { password } = req.body;
+    if (!password || password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+
+    const reset = passwordResetDB.findOne({ token: req.params.token });
+    if (!reset) return res.status(404).json({ error: 'Invalid or expired reset link' });
+    if (new Date(reset.expiresAt) < new Date()) {
+      passwordResetDB.delete(reset.id);
+      return res.status(410).json({ error: 'Reset link has expired' });
+    }
+
+    const user = usersDB.findById(reset.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    // Update password
+    const hashedPassword = await bcrypt.hash(password, 10);
+    usersDB.update(user.id, { password: hashedPassword });
+
+    // Delete reset token
+    passwordResetDB.delete(reset.id);
+
+    res.json({ success: true, message: 'Password reset successfully' });
+  } catch (e) {
+    console.error('Reset password error:', e);
+    res.status(500).json({ error: 'Failed to reset password' });
+  }
+});
+
+// ==================== DOCUMENT COMMENTS ====================
+
+// Get comments for a document
+app.get('/api/documents/:id/comments', auth, (req, res) => {
+  const doc = documentsDB.findById(req.params.id);
+  if (!doc || doc.userId !== req.user.id) {
+    return res.status(404).json({ error: 'Document not found' });
+  }
+
+  const comments = commentsDB.findAll({ documentId: req.params.id })
+    .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+  res.json(comments);
+});
+
+// Add comment to document
+app.post('/api/documents/:id/comments', auth, (req, res) => {
+  const doc = documentsDB.findById(req.params.id);
+  if (!doc || doc.userId !== req.user.id) {
+    return res.status(404).json({ error: 'Document not found' });
+  }
+
+  const { text, section } = req.body;
+  if (!text) return res.status(400).json({ error: 'Comment text required' });
+
+  const comment = commentsDB.insert({
+    documentId: req.params.id,
+    authorId: req.user.id,
+    authorName: req.user.name,
+    authorEmail: req.user.email,
+    text,
+    section: section || null,
+    resolved: false
+  });
+
+  res.json(comment);
+});
+
+// Public comment endpoint (for signers)
+app.post('/api/sign/:token/comments', (req, res) => {
+  const doc = documentsDB.findOne({ landlordSignToken: req.params.token }) ||
+              documentsDB.findOne({ tenantSignToken: req.params.token });
+
+  if (!doc) return res.status(404).json({ error: 'Document not found' });
+
+  const signerType = doc.landlordSignToken === req.params.token ? 'landlord' : 'tenant';
+  const signerName = signerType === 'landlord' ? doc.landlordName : doc.tenantName;
+  const signerEmail = signerType === 'landlord' ? doc.landlordEmail : doc.tenantEmail;
+
+  const { text, section } = req.body;
+  if (!text) return res.status(400).json({ error: 'Comment text required' });
+
+  const comment = commentsDB.insert({
+    documentId: doc.id,
+    authorId: null,
+    authorName: signerName,
+    authorEmail: signerEmail,
+    signerType,
+    text,
+    section: section || null,
+    resolved: false
+  });
+
+  // Notify document owner
+  createNotification(doc.userId, 'comment', 'New Comment', `${signerName} commented on the lease for ${doc.propertyAddress}`, doc.id);
+
+  res.json(comment);
+});
+
+// Get comments for signing page
+app.get('/api/sign/:token/comments', (req, res) => {
+  const doc = documentsDB.findOne({ landlordSignToken: req.params.token }) ||
+              documentsDB.findOne({ tenantSignToken: req.params.token });
+
+  if (!doc) return res.status(404).json({ error: 'Document not found' });
+
+  const comments = commentsDB.findAll({ documentId: doc.id })
+    .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+  res.json(comments);
+});
+
+// Resolve comment
+app.patch('/api/documents/:docId/comments/:commentId/resolve', auth, (req, res) => {
+  const doc = documentsDB.findById(req.params.docId);
+  if (!doc || doc.userId !== req.user.id) {
+    return res.status(404).json({ error: 'Document not found' });
+  }
+
+  const comment = commentsDB.findById(req.params.commentId);
+  if (!comment || comment.documentId !== req.params.docId) {
+    return res.status(404).json({ error: 'Comment not found' });
+  }
+
+  const updated = commentsDB.update(req.params.commentId, { resolved: true, resolvedAt: new Date().toISOString() });
+  res.json(updated);
+});
+
 // ==================== DOCUMENT ROUTES ====================
 
 app.get('/api/documents', auth, (req, res) => {
@@ -409,6 +653,11 @@ app.post('/api/documents/:id/send', auth, async (req, res) => {
       text: `Please sign the lease agreement: ${signUrl}`,
       html: generateSignEmail(updated, 'landlord', signUrl)
     });
+
+    // Send SMS if phone number available
+    if (doc.landlordPhone) {
+      await sendSMS(doc.landlordPhone, `LeaseSign: Please sign the lease for ${doc.propertyAddress}. Link: ${signUrl}`);
+    }
 
     logAudit(doc.id, 'SENT_FOR_SIGNATURE', req.user.email, req, { to: doc.landlordEmail });
     createNotification(req.user.id, 'sent', 'Document Sent', `Lease for ${doc.propertyAddress} sent to ${doc.landlordEmail}`, doc.id);
@@ -494,6 +743,11 @@ app.post('/api/sign/:token', async (req, res) => {
         text: `Please sign the lease agreement: ${tenantSignUrl}`,
         html: generateSignEmail(updatedDoc, 'tenant', tenantSignUrl)
       });
+
+      // Send SMS to tenant if phone available
+      if (doc.tenantPhone) {
+        await sendSMS(doc.tenantPhone, `LeaseSign: The landlord has signed! Please sign the lease for ${doc.propertyAddress}. Link: ${tenantSignUrl}`);
+      }
 
       // Notify document owner
       createNotification(doc.userId, 'signed', 'Landlord Signed', `${doc.landlordName} signed the lease for ${doc.propertyAddress}`, doc.id);
@@ -1009,21 +1263,86 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Get statistics
+// Get statistics with enhanced analytics
 app.get('/api/stats', auth, (req, res) => {
   const userDocs = documentsDB.findAll({ userId: req.user.id });
   const now = new Date();
   const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-  
+  const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+  // Basic counts
+  const draft = userDocs.filter(d => d.status === 'draft').length;
+  const pending = userDocs.filter(d => d.status === 'pending').length;
+  const partial = userDocs.filter(d => d.status === 'partial').length;
+  const completed = userDocs.filter(d => d.status === 'completed').length;
+  const voided = userDocs.filter(d => d.status === 'voided').length;
+
+  // Completion rate
+  const sentDocs = userDocs.filter(d => d.status !== 'draft');
+  const completionRate = sentDocs.length > 0 ? Math.round((completed / sentDocs.length) * 100) : 0;
+
+  // Average time to complete (in hours)
+  const completedDocs = userDocs.filter(d => d.status === 'completed' && d.tenantSignedAt && d.createdAt);
+  let avgTimeToComplete = 0;
+  if (completedDocs.length > 0) {
+    const totalHours = completedDocs.reduce((sum, d) => {
+      const created = new Date(d.createdAt);
+      const signed = new Date(d.tenantSignedAt);
+      return sum + (signed - created) / (1000 * 60 * 60);
+    }, 0);
+    avgTimeToComplete = Math.round(totalHours / completedDocs.length);
+  }
+
+  // Monthly trends (last 6 months)
+  const monthlyTrends = [];
+  for (let i = 5; i >= 0; i--) {
+    const monthStart = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() - i + 1, 0);
+    const monthName = monthStart.toLocaleString('en-US', { month: 'short' });
+    const created = userDocs.filter(d => {
+      const date = new Date(d.createdAt);
+      return date >= monthStart && date <= monthEnd;
+    }).length;
+    const signed = userDocs.filter(d => {
+      if (d.status !== 'completed') return false;
+      const date = new Date(d.tenantSignedAt || d.updatedAt);
+      return date >= monthStart && date <= monthEnd;
+    }).length;
+    monthlyTrends.push({ month: monthName, created, signed });
+  }
+
+  // Signing funnel
+  const totalSent = pending + partial + completed + voided;
+  const landlordSigned = partial + completed;
+  const fullySigned = completed;
+
+  // Recent activity
+  const recentActivity = userDocs
+    .filter(d => new Date(d.updatedAt) >= sevenDaysAgo)
+    .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
+    .slice(0, 5)
+    .map(d => ({
+      id: d.id,
+      title: d.title || d.propertyAddress,
+      status: d.status,
+      updatedAt: d.updatedAt
+    }));
+
   res.json({
     total: userDocs.length,
-    draft: userDocs.filter(d => d.status === 'draft').length,
-    pending: userDocs.filter(d => d.status === 'pending').length,
-    partial: userDocs.filter(d => d.status === 'partial').length,
-    completed: userDocs.filter(d => d.status === 'completed').length,
-    voided: userDocs.filter(d => d.status === 'voided').length,
+    draft,
+    pending,
+    partial,
+    completed,
+    voided,
     last30Days: userDocs.filter(d => new Date(d.createdAt) >= thirtyDaysAgo).length,
-    completedLast30Days: userDocs.filter(d => d.status === 'completed' && new Date(d.updatedAt) >= thirtyDaysAgo).length
+    completedLast30Days: userDocs.filter(d => d.status === 'completed' && new Date(d.updatedAt) >= thirtyDaysAgo).length,
+    // Enhanced analytics
+    completionRate,
+    avgTimeToComplete,
+    monthlyTrends,
+    signingFunnel: { totalSent, landlordSigned, fullySigned },
+    recentActivity
   });
 });
 
