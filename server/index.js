@@ -104,6 +104,23 @@ class Database {
 const usersDB = new Database('users.json');
 const documentsDB = new Database('documents.json');
 const auditDB = new Database('audit.json');
+const notificationsDB = new Database('notifications.json');
+
+// Link expiration time (7 days in milliseconds)
+const LINK_EXPIRATION_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Helper to create notification
+const createNotification = (userId, type, title, message, documentId = null) => {
+  notificationsDB.insert({
+    userId,
+    type,
+    title,
+    message,
+    documentId,
+    read: false,
+    timestamp: new Date().toISOString()
+  });
+};
 
 // Middleware
 app.use(cors());
@@ -376,10 +393,13 @@ app.post('/api/documents/:id/send', auth, async (req, res) => {
     if (!doc || doc.userId !== req.user.id) {
       return res.status(404).json({ error: 'Document not found' });
     }
-    
-    // Update status
-    const updated = documentsDB.update(req.params.id, { status: 'pending' });
-    
+
+    // Set link expiration (7 days from now)
+    const linkExpiresAt = new Date(Date.now() + LINK_EXPIRATION_MS).toISOString();
+
+    // Update status and expiration
+    const updated = documentsDB.update(req.params.id, { status: 'pending', linkExpiresAt });
+
     // Send email to landlord
     const signUrl = `${APP_URL}/sign/${doc.landlordSignToken}`;
     await mailer.sendMail({
@@ -387,10 +407,11 @@ app.post('/api/documents/:id/send', auth, async (req, res) => {
       to: doc.landlordEmail,
       subject: `[Action Required] Sign Lease for ${doc.propertyAddress}`,
       text: `Please sign the lease agreement: ${signUrl}`,
-      html: generateSignEmail(doc, 'landlord', signUrl)
+      html: generateSignEmail(updated, 'landlord', signUrl)
     });
-    
+
     logAudit(doc.id, 'SENT_FOR_SIGNATURE', req.user.email, req, { to: doc.landlordEmail });
+    createNotification(req.user.id, 'sent', 'Document Sent', `Lease for ${doc.propertyAddress} sent to ${doc.landlordEmail}`, doc.id);
     res.json(updated);
   } catch (e) {
     console.error('Send error:', e);
@@ -402,11 +423,16 @@ app.post('/api/documents/:id/send', auth, async (req, res) => {
 app.get('/api/sign/:token', (req, res) => {
   const doc = documentsDB.findOne({ landlordSignToken: req.params.token }) ||
               documentsDB.findOne({ tenantSignToken: req.params.token });
-  
+
   if (!doc) return res.status(404).json({ error: 'Document not found or link expired' });
-  
+
+  // Check if link has expired
+  if (doc.linkExpiresAt && new Date(doc.linkExpiresAt) < new Date()) {
+    return res.status(410).json({ error: 'This signing link has expired. Please contact the sender to request a new link.', expired: true });
+  }
+
   const signerType = doc.landlordSignToken === req.params.token ? 'landlord' : 'tenant';
-  
+
   // Check if already signed
   if (signerType === 'landlord' && doc.landlordSignedAt) {
     return res.status(400).json({ error: 'Already signed by landlord' });
@@ -414,13 +440,13 @@ app.get('/api/sign/:token', (req, res) => {
   if (signerType === 'tenant' && doc.tenantSignedAt) {
     return res.status(400).json({ error: 'Already signed by tenant' });
   }
-  
+
   // Remove sensitive tokens
   const safeDoc = { ...doc };
   delete safeDoc.landlordSignToken;
   delete safeDoc.tenantSignToken;
   delete safeDoc.userId;
-  
+
   res.json({ document: safeDoc, signerType });
 });
 
@@ -429,36 +455,48 @@ app.post('/api/sign/:token', async (req, res) => {
   try {
     const { signature } = req.body;
     if (!signature) return res.status(400).json({ error: 'Signature required' });
-    
+
     const doc = documentsDB.findOne({ landlordSignToken: req.params.token }) ||
                 documentsDB.findOne({ tenantSignToken: req.params.token });
-    
+
     if (!doc) return res.status(404).json({ error: 'Document not found' });
-    
+
+    // Check if link has expired
+    if (doc.linkExpiresAt && new Date(doc.linkExpiresAt) < new Date()) {
+      return res.status(410).json({ error: 'This signing link has expired. Please contact the sender to request a new link.', expired: true });
+    }
+
     const signerType = doc.landlordSignToken === req.params.token ? 'landlord' : 'tenant';
     const ip = req.ip || req.connection?.remoteAddress || 'unknown';
     const now = new Date().toISOString();
-    
+
     let updates = {};
-    
+
     if (signerType === 'landlord') {
+      // Reset expiration for tenant (7 more days)
+      const newExpiration = new Date(Date.now() + LINK_EXPIRATION_MS).toISOString();
       updates = {
         landlordSignature: signature,
         landlordSignedAt: now,
         landlordSignedIp: ip,
+        linkExpiresAt: newExpiration,
         status: doc.tenantSignedAt ? 'completed' : 'partial'
       };
       logAudit(doc.id, 'LANDLORD_SIGNED', doc.landlordEmail, req);
-      
+
       // Send email to tenant
       const tenantSignUrl = `${APP_URL}/sign/${doc.tenantSignToken}`;
+      const updatedDoc = { ...doc, linkExpiresAt: newExpiration };
       await mailer.sendMail({
         from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
         to: doc.tenantEmail,
         subject: `[Action Required] Sign Lease for ${doc.propertyAddress}`,
         text: `Please sign the lease agreement: ${tenantSignUrl}`,
-        html: generateSignEmail(doc, 'tenant', tenantSignUrl)
+        html: generateSignEmail(updatedDoc, 'tenant', tenantSignUrl)
       });
+
+      // Notify document owner
+      createNotification(doc.userId, 'signed', 'Landlord Signed', `${doc.landlordName} signed the lease for ${doc.propertyAddress}`, doc.id);
     } else {
       updates = {
         tenantSignature: signature,
@@ -467,15 +505,19 @@ app.post('/api/sign/:token', async (req, res) => {
         status: doc.landlordSignedAt ? 'completed' : 'partial'
       };
       logAudit(doc.id, 'TENANT_SIGNED', doc.tenantEmail, req);
+
+      // Notify document owner
+      createNotification(doc.userId, 'signed', 'Tenant Signed', `${doc.tenantName} signed the lease for ${doc.propertyAddress}`, doc.id);
     }
-    
+
     const updated = documentsDB.update(doc.id, updates);
-    
-    // If completed, send completion emails
+
+    // If completed, send completion emails and notify
     if (updated.status === 'completed') {
       await sendCompletionEmails(updated);
+      createNotification(doc.userId, 'completed', 'Lease Completed', `The lease for ${doc.propertyAddress} has been fully executed!`, doc.id);
     }
-    
+
     res.json({ success: true, status: updated.status });
   } catch (e) {
     console.error('Sign error:', e);
@@ -826,7 +868,8 @@ function generatePDF(doc, res) {
 function generateSignEmail(doc, signerType, signUrl) {
   const signerName = signerType === 'landlord' ? doc.landlordName : doc.tenantName;
   const primaryColor = '#4f46e5';
-  
+  const expiresDate = doc.linkExpiresAt ? new Date(doc.linkExpiresAt).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }) : null;
+
   return `
 <!DOCTYPE html>
 <html>
@@ -848,13 +891,13 @@ function generateSignEmail(doc, signerType, signUrl) {
         <p style="color: #4b5563; line-height: 1.6; margin: 0 0 20px;">
           A residential lease agreement is ready for your electronic signature. Please review the document carefully before signing.
         </p>
-        
+
         <table width="100%" style="background: #f9fafb; border-radius: 8px; padding: 20px; margin: 20px 0; border-left: 4px solid ${primaryColor};">
           <tr><td style="padding: 8px 0;"><strong style="color: #374151;">Property:</strong> <span style="color: #6b7280;">${doc.propertyAddress || 'N/A'}</span></td></tr>
           <tr><td style="padding: 8px 0;"><strong style="color: #374151;">Monthly Rent:</strong> <span style="color: #6b7280;">$${doc.monthlyRent?.toLocaleString() || 'N/A'}</span></td></tr>
           <tr><td style="padding: 8px 0;"><strong style="color: #374151;">Lease Term:</strong> <span style="color: #6b7280;">${doc.commencementDate || 'N/A'} to ${doc.expirationDate || 'N/A'}</span></td></tr>
         </table>
-        
+
         <table width="100%" cellpadding="0" cellspacing="0">
           <tr>
             <td style="text-align: center; padding: 20px 0;">
@@ -864,9 +907,15 @@ function generateSignEmail(doc, signerType, signUrl) {
             </td>
           </tr>
         </table>
-        
+
+        ${expiresDate ? `
+        <div style="background: #fef3c7; border: 1px solid #fbbf24; border-radius: 8px; padding: 12px 16px; margin: 16px 0; text-align: center;">
+          <span style="color: #92400e; font-size: 14px;">⏰ This link expires on <strong>${expiresDate}</strong></span>
+        </div>
+        ` : ''}
+
         <p style="color: #9ca3af; font-size: 13px; margin: 20px 0 0; padding-top: 20px; border-top: 1px solid #e5e7eb;">
-          This link is unique to you and expires after signing. Do not share this link with others.
+          This link is unique to you. Do not share this link with others.
         </p>
       </td>
     </tr>
@@ -1264,6 +1313,116 @@ function generateReminderEmail(doc, signerType, signUrl) {
 </body>
 </html>`;
 }
+
+// ==================== REGENERATE LINK ====================
+
+// Regenerate expired signing link
+app.post('/api/documents/:id/regenerate-link', auth, async (req, res) => {
+  try {
+    const doc = documentsDB.findById(req.params.id);
+    if (!doc || doc.userId !== req.user.id) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+
+    if (doc.status === 'completed' || doc.status === 'voided' || doc.status === 'draft') {
+      return res.status(400).json({ error: 'Cannot regenerate link for this document status' });
+    }
+
+    // Generate new expiration (7 days)
+    const linkExpiresAt = new Date(Date.now() + LINK_EXPIRATION_MS).toISOString();
+    const updated = documentsDB.update(req.params.id, { linkExpiresAt });
+
+    // Send new email to the pending signer
+    let recipient, signUrl, signerType;
+    if (!doc.landlordSignedAt) {
+      recipient = doc.landlordEmail;
+      signUrl = `${APP_URL}/sign/${doc.landlordSignToken}`;
+      signerType = 'landlord';
+    } else if (!doc.tenantSignedAt) {
+      recipient = doc.tenantEmail;
+      signUrl = `${APP_URL}/sign/${doc.tenantSignToken}`;
+      signerType = 'tenant';
+    }
+
+    if (recipient) {
+      await mailer.sendMail({
+        from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
+        to: recipient,
+        subject: `[New Link] Sign Lease for ${doc.propertyAddress}`,
+        text: `Your previous signing link has been renewed: ${signUrl}`,
+        html: generateSignEmail(updated, signerType, signUrl)
+      });
+    }
+
+    logAudit(doc.id, 'LINK_REGENERATED', req.user.email, req, { to: recipient });
+    res.json({ success: true, linkExpiresAt, sentTo: recipient });
+  } catch (e) {
+    console.error('Regenerate link error:', e);
+    res.status(500).json({ error: 'Failed to regenerate link' });
+  }
+});
+
+// ==================== BULK DELETE ====================
+
+app.post('/api/documents/bulk-delete', auth, async (req, res) => {
+  try {
+    const { documentIds } = req.body;
+    if (!documentIds || !Array.isArray(documentIds)) {
+      return res.status(400).json({ error: 'Document IDs required' });
+    }
+
+    const results = [];
+    for (const id of documentIds) {
+      const doc = documentsDB.findById(id);
+      if (!doc || doc.userId !== req.user.id) {
+        results.push({ id, success: false, error: 'Not found' });
+        continue;
+      }
+      if (doc.status !== 'draft') {
+        results.push({ id, success: false, error: 'Can only delete drafts' });
+        continue;
+      }
+
+      documentsDB.delete(id);
+      results.push({ id, success: true });
+    }
+
+    res.json({ results, deletedCount: results.filter(r => r.success).length });
+  } catch (e) {
+    console.error('Bulk delete error:', e);
+    res.status(500).json({ error: 'Failed to delete documents' });
+  }
+});
+
+// ==================== NOTIFICATIONS ====================
+
+// Get notifications
+app.get('/api/notifications', auth, (req, res) => {
+  const notifications = notificationsDB.findAll({ userId: req.user.id })
+    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+    .slice(0, 50); // Return last 50
+
+  const unreadCount = notifications.filter(n => !n.read).length;
+  res.json({ notifications, unreadCount });
+});
+
+// Mark notification as read
+app.patch('/api/notifications/:id/read', auth, (req, res) => {
+  const notification = notificationsDB.findById(req.params.id);
+  if (!notification || notification.userId !== req.user.id) {
+    return res.status(404).json({ error: 'Notification not found' });
+  }
+
+  const updated = notificationsDB.update(req.params.id, { read: true });
+  res.json(updated);
+});
+
+// Mark all notifications as read
+app.post('/api/notifications/mark-all-read', auth, (req, res) => {
+  const notifications = notificationsDB.findAll({ userId: req.user.id, read: false });
+  notifications.forEach(n => notificationsDB.update(n.id, { read: true }));
+  res.json({ success: true, updated: notifications.length });
+});
 
 // ==================== CATCH-ALL ROUTE ====================
 
