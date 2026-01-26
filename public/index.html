@@ -1379,11 +1379,27 @@
 
             // Bulk actions
             const bulkDelete = async () => {
-                if (!confirm(`Delete ${selectedDocs.length} draft document(s)? This cannot be undone.`)) return;
+                // Filter to only include draft documents from selection
+                const draftIds = selectedDocs.filter(id => {
+                    const doc = docs.find(d => d.id === id);
+                    return doc && doc.status === 'draft';
+                });
+
+                if (draftIds.length === 0) {
+                    toast('No draft documents selected. Only drafts can be deleted.', 'error');
+                    return;
+                }
+
+                const nonDraftCount = selectedDocs.length - draftIds.length;
+                const confirmMsg = nonDraftCount > 0
+                    ? `Delete ${draftIds.length} draft document(s)? (${nonDraftCount} non-draft document(s) will be skipped) This cannot be undone.`
+                    : `Delete ${draftIds.length} draft document(s)? This cannot be undone.`;
+
+                if (!confirm(confirmMsg)) return;
                 setBulkLoading(true);
                 try {
-                    const result = await api.post('/documents/bulk-delete', { documentIds: selectedDocs });
-                    setDocs(docs.filter(d => !selectedDocs.includes(d.id) || d.status !== 'draft'));
+                    const result = await api.post('/documents/bulk-delete', { documentIds: draftIds });
+                    setDocs(docs.filter(d => !draftIds.includes(d.id)));
                     setSelectedDocs([]);
                     toast(`Deleted ${result.deletedCount} document(s)`);
                 } catch (e) { toast(e.message, 'error'); }
