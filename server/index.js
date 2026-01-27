@@ -44,7 +44,7 @@ const GENERATED_DIR = path.join(__dirname, '../generated');
 // PostgreSQL connection
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+  ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : false
 });
 
 // Initialize database tables
