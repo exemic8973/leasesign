@@ -1285,7 +1285,119 @@ function generateSignEmail(doc, signerType, signUrl) {
 </html>`;
 }
 
+// Generate PDF as buffer for email attachment
+function generatePDFBuffer(doc) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    const pdf = new PDFDocument({ size: 'LETTER', margins: { top: 50, bottom: 50, left: 60, right: 60 } });
+
+    pdf.on('data', chunk => chunks.push(chunk));
+    pdf.on('end', () => resolve(Buffer.concat(chunks)));
+    pdf.on('error', reject);
+
+    // Helper functions
+    const field = (val) => val || '________________________';
+    const money = (val) => val ? `$${parseFloat(val).toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '$____________';
+    const checkbox = (checked) => checked ? '[X]' : '[ ]';
+
+    // Title
+    pdf.font('Helvetica-Bold').fontSize(16).text('RESIDENTIAL LEASE', { align: 'center' });
+    pdf.font('Helvetica').fontSize(8).text('Texas Association of REALTORS - Fully Executed', { align: 'center' });
+    pdf.moveDown(2);
+
+    // Parties
+    pdf.font('Helvetica-Bold').fontSize(11).text('1. PARTIES');
+    pdf.font('Helvetica').fontSize(10);
+    pdf.text(`Landlord: ${field(doc.landlordName)} (${field(doc.landlordEmail)})`);
+    pdf.text(`Tenant: ${field(doc.tenantName)} (${field(doc.tenantEmail)})`);
+    pdf.moveDown();
+
+    // Property
+    pdf.font('Helvetica-Bold').fontSize(11).text('2. PROPERTY');
+    pdf.font('Helvetica').fontSize(10);
+    pdf.text(`Address: ${field(doc.propertyAddress)}, ${field(doc.propertyCity)}, TX ${field(doc.propertyZip)}`);
+    pdf.text(`County: ${field(doc.propertyCounty)}`);
+    pdf.moveDown();
+
+    // Term
+    pdf.font('Helvetica-Bold').fontSize(11).text('3. LEASE TERM');
+    pdf.font('Helvetica').fontSize(10);
+    pdf.text(`Start Date: ${field(doc.commencementDate)}`);
+    pdf.text(`End Date: ${field(doc.expirationDate)}`);
+    pdf.moveDown();
+
+    // Rent
+    pdf.font('Helvetica-Bold').fontSize(11).text('4. RENT');
+    pdf.font('Helvetica').fontSize(10);
+    pdf.text(`Monthly Rent: ${money(doc.monthlyRent)}`);
+    pdf.text(`Security Deposit: ${money(doc.securityDeposit)}`);
+    pdf.text(`Late Fee: ${money(doc.initialLateFee)} initial, ${money(doc.dailyLateFee)}/day after grace period`);
+    pdf.moveDown();
+
+    // Special Provisions
+    if (doc.specialProvisions) {
+      pdf.font('Helvetica-Bold').fontSize(11).text('5. SPECIAL PROVISIONS');
+      pdf.font('Helvetica').fontSize(10);
+      pdf.text(doc.specialProvisions);
+      pdf.moveDown();
+    }
+
+    // Signatures
+    pdf.moveDown(2);
+    pdf.font('Helvetica-Bold').fontSize(14).text('SIGNATURES', { align: 'center' });
+    pdf.moveDown();
+
+    // Landlord Signature
+    pdf.font('Helvetica-Bold').fontSize(11).text('LANDLORD:');
+    if (doc.landlordSignature) {
+      try {
+        const imgData = doc.landlordSignature.replace(/^data:image\/\w+;base64,/, '');
+        pdf.image(Buffer.from(imgData, 'base64'), { width: 150, height: 50 });
+      } catch (e) {
+        pdf.font('Helvetica-Oblique').fontSize(10).text('[Electronic Signature]');
+      }
+      pdf.font('Helvetica').fontSize(9);
+      pdf.text(`Signed: ${doc.landlordName} on ${new Date(doc.landlordSignedAt).toLocaleString()}`);
+      pdf.text(`IP: ${doc.landlordSignedIp}`);
+    }
+    pdf.moveDown();
+
+    // Tenant Signature
+    pdf.font('Helvetica-Bold').fontSize(11).text('TENANT:');
+    if (doc.tenantSignature) {
+      try {
+        const imgData = doc.tenantSignature.replace(/^data:image\/\w+;base64,/, '');
+        pdf.image(Buffer.from(imgData, 'base64'), { width: 150, height: 50 });
+      } catch (e) {
+        pdf.font('Helvetica-Oblique').fontSize(10).text('[Electronic Signature]');
+      }
+      pdf.font('Helvetica').fontSize(9);
+      pdf.text(`Signed: ${doc.tenantName} on ${new Date(doc.tenantSignedAt).toLocaleString()}`);
+      pdf.text(`IP: ${doc.tenantSignedIp}`);
+    }
+
+    // Certificate
+    pdf.moveDown(2);
+    pdf.font('Helvetica-Bold').fontSize(10).text('CERTIFICATE OF COMPLETION', { align: 'center' });
+    pdf.font('Helvetica').fontSize(8).fillColor('#666666');
+    pdf.text('This document was electronically signed via LeaseSign.', { align: 'center' });
+    pdf.text(`Document ID: ${doc.id}`, { align: 'center' });
+    pdf.text(`Completed: ${new Date().toISOString()}`, { align: 'center' });
+    pdf.text('Status: FULLY EXECUTED', { align: 'center' });
+
+    pdf.end();
+  });
+}
+
 async function sendCompletionEmails(doc) {
+  // Generate PDF attachment
+  let pdfBuffer;
+  try {
+    pdfBuffer = await generatePDFBuffer(doc);
+  } catch (e) {
+    console.error('Failed to generate PDF for email:', e);
+  }
+
   const html = `
 <!DOCTYPE html>
 <html>
@@ -1313,7 +1425,7 @@ async function sendCompletionEmails(doc) {
         </table>
 
         <p style="color: #6b7280; font-size: 14px;">
-          Please keep this document for your records. You can download a PDF copy from your LeaseSign dashboard.
+          ${pdfBuffer ? 'The signed lease agreement is attached to this email as a PDF.' : 'You can download a PDF copy from your LeaseSign dashboard.'}
         </p>
       </td>
     </tr>
@@ -1321,19 +1433,22 @@ async function sendCompletionEmails(doc) {
 </body>
 </html>`;
 
+  const filename = `Signed_Lease_${(doc.propertyAddress || 'document').replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
+
+  const emailOptions = {
+    from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
+    subject: `Lease Completed: ${doc.propertyAddress}`,
+    html,
+    attachments: pdfBuffer ? [{
+      filename,
+      content: pdfBuffer,
+      contentType: 'application/pdf'
+    }] : []
+  };
+
   await Promise.all([
-    mailer.sendMail({
-      from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
-      to: doc.landlordEmail,
-      subject: `Lease Completed: ${doc.propertyAddress}`,
-      html
-    }),
-    mailer.sendMail({
-      from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
-      to: doc.tenantEmail,
-      subject: `Lease Completed: ${doc.propertyAddress}`,
-      html
-    })
+    mailer.sendMail({ ...emailOptions, to: doc.landlordEmail }),
+    mailer.sendMail({ ...emailOptions, to: doc.tenantEmail })
   ]);
 }
 
