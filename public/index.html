@@ -850,6 +850,19 @@
             const isEditing = !!editDoc;
             const source = editDoc || template;
             const [step, setStep] = useState(1);
+
+            // Calculate default dates (start: 1st of next month, end: 1 year later)
+            const getDefaultDates = () => {
+                const today = new Date();
+                const startDate = new Date(today.getFullYear(), today.getMonth() + 1, 1);
+                const endDate = new Date(startDate.getFullYear() + 1, startDate.getMonth(), 0);
+                return {
+                    start: startDate.toISOString().split('T')[0],
+                    end: endDate.toISOString().split('T')[0]
+                };
+            };
+            const defaultDates = getDefaultDates();
+
             const [form, setForm] = useState({
                 title: source?.title || '',
                 landlordName: source?.landlordName || user.name,
@@ -861,40 +874,40 @@
                 tenantPhone: source?.tenantPhone || '',
                 additionalTenants: source?.additionalTenants || [],
                 additionalOccupants: source?.additionalOccupants || '',
-                propertyAddress: template?.propertyAddress || '',
-                propertyCity: template?.propertyCity || '',
-                propertyZip: template?.propertyZip || '',
-                propertyCounty: template?.propertyCounty || '',
-                legalDescription: template?.legalDescription || '',
-                propertyType: template?.propertyType || 'single-family',
-                bedrooms: template?.bedrooms || '',
-                bathrooms: template?.bathrooms || '',
-                squareFeet: template?.squareFeet || '',
-                parkingSpaces: template?.parkingSpaces || '2',
-                commencementDate: template?.commencementDate || '',
-                expirationDate: template?.expirationDate || '',
-                monthlyRent: template?.monthlyRent || '',
-                securityDeposit: template?.securityDeposit || '',
-                proratedRent: template?.proratedRent || '',
-                proratedDueDate: template?.proratedDueDate || '',
-                gracePeriodDay: template?.gracePeriodDay || '3',
-                initialLateFee: template?.initialLateFee || '50',
-                dailyLateFee: template?.dailyLateFee || '25',
-                returnedPaymentFee: template?.returnedPaymentFee || '75',
-                paymentName: template?.paymentName || '',
-                paymentAddress: template?.paymentAddress || '',
-                paymentMethods: template?.paymentMethods || ['check', 'electronic'],
-                petsAllowed: template?.petsAllowed || false,
-                petDeposit: template?.petDeposit || '',
-                petRent: source?.petRent || '',
-                allowedPets: source?.allowedPets || '',
+                propertyAddress: source?.propertyAddress || '',
+                propertyCity: source?.propertyCity || 'Austin',
+                propertyZip: source?.propertyZip || '',
+                propertyCounty: source?.propertyCounty || 'Travis',
+                legalDescription: source?.legalDescription || '',
+                propertyType: source?.propertyType || 'single-family',
+                bedrooms: source?.bedrooms || '3',
+                bathrooms: source?.bathrooms || '2',
+                squareFeet: source?.squareFeet || '1500',
+                parkingSpaces: source?.parkingSpaces || '2',
+                commencementDate: source?.commencementDate || defaultDates.start,
+                expirationDate: source?.expirationDate || defaultDates.end,
+                monthlyRent: source?.monthlyRent || '2000',
+                securityDeposit: source?.securityDeposit || '2000',
+                proratedRent: source?.proratedRent || '',
+                proratedDueDate: source?.proratedDueDate || '',
+                gracePeriodDay: source?.gracePeriodDay || '3',
+                initialLateFee: source?.initialLateFee || '50',
+                dailyLateFee: source?.dailyLateFee || '25',
+                returnedPaymentFee: source?.returnedPaymentFee || '75',
+                paymentName: source?.paymentName || user.name,
+                paymentAddress: source?.paymentAddress || '',
+                paymentMethods: source?.paymentMethods || ['check', 'electronic'],
+                petsAllowed: source?.petsAllowed || false,
+                petDeposit: source?.petDeposit || '300',
+                petRent: source?.petRent || '25',
+                allowedPets: source?.allowedPets || 'Cats and dogs under 50 lbs',
                 smokingAllowed: source?.smokingAllowed || false,
                 utilitiesTenant: source?.utilitiesTenant || ['electric', 'gas', 'water', 'trash', 'internet'],
                 utilitiesLandlord: source?.utilitiesLandlord || [],
                 hoaName: source?.hoaName || '',
                 accessNoticeHours: source?.accessNoticeHours || '24',
                 terminationNoticeDays: source?.terminationNoticeDays || '30',
-                specialProvisions: source?.specialProvisions || ''
+                specialProvisions: source?.specialProvisions || 'Tenant agrees to maintain renter\'s insurance with minimum $100,000 liability coverage.\nTenant responsible for lawn maintenance and minor repairs under $100.'
             });
             const upd = (k, v) => setForm({ ...form, [k]: v });
             const toggleArray = (arr, val) => arr.includes(val) ? arr.filter(x => x !== val) : [...arr, val];
