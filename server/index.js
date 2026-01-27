@@ -41,10 +41,17 @@ const GENERATED_DIR = path.join(__dirname, '../generated');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
-// PostgreSQL connection
+// PostgreSQL connection - handle various SSL configurations
+let sslConfig = false;
+if (process.env.DATABASE_SSL === 'true') {
+  sslConfig = { rejectUnauthorized: false };
+} else if (process.env.DATABASE_SSL === 'no-verify') {
+  sslConfig = { rejectUnauthorized: false };
+}
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : false
+  ssl: sslConfig
 });
 
 // Initialize database tables
