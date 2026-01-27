@@ -897,25 +897,38 @@ function generatePDF(doc, res) {
 
   pdf.pipe(res);
 
+  generatePDFContent(pdf, doc);
+}
+
+function generatePDFContent(pdf, doc) {
+  // Page dimensions: LETTER = 612 x 792 points
+  // Margins: 60 left, 60 right = 492 usable width
+  const leftMargin = 60;
+  const textWidth = 492;
+
   // Helper functions
   const field = (val) => val || '________________________';
   const money = (val) => val ? `$${parseFloat(val).toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '$____________';
   const checkbox = (checked) => checked ? '[X]' : '[ ]';
   let pageNum = 1;
 
+  const resetX = () => { pdf.x = leftMargin; };
+
   const addHeader = () => {
     pdf.font('Helvetica').fontSize(8).fillColor('#666666');
-    pdf.text('RESIDENTIAL LEASE - TAR 2001', 60, 30);
+    pdf.text('RESIDENTIAL LEASE - TAR 2001', leftMargin, 30, { width: textWidth });
     pdf.text(`Page ${pageNum}`, 500, 30);
     pdf.fillColor('#000000');
+    resetX();
     pageNum++;
   };
 
   const addFooter = () => {
     const y = pdf.page.height - 40;
     pdf.font('Helvetica').fontSize(7).fillColor('#666666');
-    pdf.text(`${doc.propertyAddress || 'Property'} | Landlord: ${doc.landlordName || ''} | Tenant: ${doc.tenantName || ''}`, 60, y, { width: 500, align: 'center' });
+    pdf.text(`${doc.propertyAddress || 'Property'} | Landlord: ${doc.landlordName || ''} | Tenant: ${doc.tenantName || ''}`, leftMargin, y, { width: textWidth, align: 'center' });
     pdf.fillColor('#000000');
+    resetX();
   };
 
   const newPage = () => {
@@ -923,6 +936,7 @@ function generatePDF(doc, res) {
     pdf.addPage();
     addHeader();
     pdf.y = 60;
+    resetX();
   };
 
   const checkSpace = (needed = 100) => {
@@ -931,37 +945,50 @@ function generatePDF(doc, res) {
 
   const sectionTitle = (num, title) => {
     checkSpace(80);
+    resetX();
     pdf.font('Helvetica-Bold').fontSize(10).fillColor('#000000');
-    pdf.text(`${num}. ${title}`);
+    pdf.text(`${num}. ${title}`, { width: textWidth });
     pdf.font('Helvetica').fontSize(9);
     pdf.moveDown(0.3);
+    resetX();
+  };
+
+  const paragraph = (text) => {
+    resetX();
+    pdf.text(text, { width: textWidth });
   };
 
   const subSection = (letter, text) => {
     checkSpace(40);
-    pdf.font('Helvetica-Bold').fontSize(9).text(`${letter}. `, { continued: true });
-    pdf.font('Helvetica').fontSize(9).text(text);
+    resetX();
+    pdf.font('Helvetica-Bold').fontSize(9).text(`${letter}. `, { continued: true, width: textWidth });
+    pdf.font('Helvetica').fontSize(9).text(text, { width: textWidth - 20 });
     pdf.moveDown(0.3);
+    resetX();
   };
 
   // ===== PAGE 1 - HEADER =====
   addHeader();
   pdf.y = 50;
+  resetX();
 
   // Title Block
-  pdf.font('Helvetica-Bold').fontSize(16).text('RESIDENTIAL LEASE', { align: 'center' });
-  pdf.font('Helvetica').fontSize(8).text('USE OF THIS FORM BY PERSONS WHO ARE NOT MEMBERS OF THE TEXAS ASSOCIATION OF REALTORS IS NOT AUTHORIZED.', { align: 'center' });
-  pdf.text('Texas Association of REALTORS, Inc. 2022', { align: 'center' });
+  pdf.font('Helvetica-Bold').fontSize(16).text('RESIDENTIAL LEASE', leftMargin, pdf.y, { width: textWidth, align: 'center' });
+  resetX();
+  pdf.font('Helvetica').fontSize(8).text('USE OF THIS FORM BY PERSONS WHO ARE NOT MEMBERS OF THE TEXAS ASSOCIATION OF REALTORS IS NOT AUTHORIZED.', { width: textWidth, align: 'center' });
+  resetX();
+  pdf.text('Texas Association of REALTORS, Inc. 2022', { width: textWidth, align: 'center' });
   pdf.moveDown(1.5);
+  resetX();
 
   // Section 1: PARTIES
   sectionTitle('1', 'PARTIES');
-  pdf.text(`The parties to this lease are: the owner of the Property (Landlord): ${field(doc.landlordName)}; and the following tenant(s) (collectively referred to as "Tenant"): ${field(doc.tenantName)}.`);
+  paragraph(`The parties to this lease are: the owner of the Property (Landlord): ${field(doc.landlordName)}; and the following tenant(s) (collectively referred to as "Tenant"): ${field(doc.tenantName)}.`);
   pdf.moveDown();
 
   // Section 2: PROPERTY
   sectionTitle('2', 'PROPERTY');
-  pdf.text(`Landlord leases to Tenant the real property described below together with all its improvements (collectively the "Property"):`);
+  paragraph(`Landlord leases to Tenant the real property described below together with all its improvements (collectively the "Property"):`);
   pdf.moveDown(0.3);
   subSection('A', `Address: ${field(doc.propertyAddress)}, ${field(doc.propertyCity)}, TX ${field(doc.propertyZip)}`);
   subSection('B', `Legal Description: ${field(doc.legalDescription)}`);
@@ -972,14 +999,14 @@ function generatePDF(doc, res) {
   // Section 3: TERM
   sectionTitle('3', 'TERM');
   subSection('A', 'Primary Term:');
-  pdf.text(`   Commencement Date: ${field(doc.commencementDate)}`);
-  pdf.text(`   Expiration Date: ${field(doc.expirationDate)} at 11:59 p.m.`);
+  paragraph(`   Commencement Date: ${field(doc.commencementDate)}`);
+  paragraph(`   Expiration Date: ${field(doc.expirationDate)} at 11:59 p.m.`);
   subSection('B', 'Delay of Occupancy: If Tenant cannot occupy the Property on the Commencement Date because of construction, Tenant may terminate this lease by written notice before the Property is available.');
   pdf.moveDown();
 
   // Section 4: AUTOMATIC RENEWAL
   sectionTitle('4', 'AUTOMATIC RENEWAL');
-  pdf.text(`This lease automatically renews on a month-to-month basis unless either party provides written notice of termination at least ${field(doc.terminationNoticeDays || '30')} days before the Expiration Date.`);
+  paragraph(`This lease automatically renews on a month-to-month basis unless either party provides written notice of termination at least ${field(doc.terminationNoticeDays || '30')} days before the Expiration Date.`);
   pdf.moveDown();
 
   // Section 5: RENT
@@ -988,36 +1015,36 @@ function generatePDF(doc, res) {
   if (doc.proratedRent) {
     subSection('B', `Prorated Rent: ${money(doc.proratedRent)} due on or before ${field(doc.proratedDueDate)}.`);
   }
-  subSection('C', 'Payment Method: ' + [
+  subSection('C', 'Payment Method: ' + ([
     doc.paymentCashiersCheck ? 'Cashier\'s Check' : '',
     doc.paymentMoneyOrder ? 'Money Order' : '',
     doc.paymentPersonalCheck ? 'Personal Check' : '',
     doc.paymentElectronic ? 'Electronic Payment' : ''
-  ].filter(Boolean).join(', ') || 'Any acceptable form');
+  ].filter(Boolean).join(', ') || 'Any acceptable form'));
   subSection('D', `Place of Payment: ${field(doc.paymentName || doc.landlordName)}, ${field(doc.paymentAddress)}`);
   pdf.moveDown();
 
   // Section 6: LATE CHARGES
   sectionTitle('6', 'LATE CHARGES');
-  pdf.text(`If rent is not received by the ${field(doc.gracePeriodDay || '3')}rd day of each month at 11:59 p.m., Tenant will pay:`);
-  pdf.text(`   (1) Initial late charge: ${money(doc.initialLateFee || 50)}`);
-  pdf.text(`   (2) Additional daily charge: ${money(doc.dailyLateFee || 25)} per day until paid`);
+  paragraph(`If rent is not received by the ${field(doc.gracePeriodDay || '3')}rd day of each month at 11:59 p.m., Tenant will pay:`);
+  paragraph(`   (1) Initial late charge: ${money(doc.initialLateFee || 50)}`);
+  paragraph(`   (2) Additional daily charge: ${money(doc.dailyLateFee || 25)} per day until paid`);
   pdf.moveDown();
 
   // Section 7: RETURNED PAYMENTS
   sectionTitle('7', 'RETURNED PAYMENTS');
-  pdf.text(`Tenant will pay ${money(doc.returnedPaymentFee || 75)} for each returned or dishonored payment.`);
+  paragraph(`Tenant will pay ${money(doc.returnedPaymentFee || 75)} for each returned or dishonored payment.`);
   pdf.moveDown();
 
   // Section 8: APPLICATION OF PAYMENTS
   sectionTitle('8', 'APPLICATION OF PAYMENTS');
-  pdf.text('Payments applied first to non-rent obligations (late charges, repairs, etc.), then to rent.');
+  paragraph('Payments applied first to non-rent obligations (late charges, repairs, etc.), then to rent.');
   pdf.moveDown();
 
   // Section 9: ANIMALS
   sectionTitle('9', 'ANIMALS');
-  pdf.text(`${checkbox(!doc.petsAllowed)} No animals permitted  ${checkbox(doc.petsAllowed)} Animals permitted: ${field(doc.allowedPets)}`);
-  pdf.text(`Unauthorized animal fee: ${money(doc.unauthorizedPetFee || 100)} per animal per day.`);
+  paragraph(`${checkbox(!doc.petsAllowed)} No animals permitted  ${checkbox(doc.petsAllowed)} Animals permitted: ${field(doc.allowedPets)}`);
+  paragraph(`Unauthorized animal fee: ${money(doc.unauthorizedPetFee || 100)} per animal per day.`);
   pdf.moveDown();
 
   // Section 10: SECURITY DEPOSIT
@@ -1029,7 +1056,7 @@ function generatePDF(doc, res) {
 
   // Section 11: UTILITIES
   sectionTitle('11', 'UTILITIES');
-  pdf.text(`Tenant pays all utilities except: ${field(doc.landlordPaysUtilities || 'None')}`);
+  paragraph(`Tenant pays all utilities except: ${field(doc.landlordPaysUtilities || 'None')}`);
   pdf.moveDown();
 
   // Section 12: USE AND OCCUPANCY
@@ -1042,25 +1069,25 @@ function generatePDF(doc, res) {
 
   // Section 13: PARKING
   sectionTitle('13', 'PARKING RULES');
-  pdf.text(`Maximum ${field(doc.maxVehicles || '4')} vehicles. All must be operable with current registration. No commercial vehicles, trailers, or RVs without consent.`);
+  paragraph(`Maximum ${field(doc.maxVehicles || '4')} vehicles. All must be operable with current registration. No commercial vehicles, trailers, or RVs without consent.`);
   pdf.moveDown();
 
   // Section 14: ACCESS BY LANDLORD
   sectionTitle('14', 'ACCESS BY LANDLORD');
-  pdf.text(`Landlord may enter at reasonable times with ${field(doc.accessNoticeHours || '24')} hours notice (except emergencies).`);
+  paragraph(`Landlord may enter at reasonable times with ${field(doc.accessNoticeHours || '24')} hours notice (except emergencies).`);
   subSection('A', `Trip Charge: ${money(doc.tripCharge || 75)} if Tenant fails to permit access.`);
   subSection('B', `Keybox: ${checkbox(doc.keyboxAuthorized)} Authorized during last ${field(doc.keyboxDays || '30')} days of lease.`);
   pdf.moveDown();
 
   // Section 15: MOVE-IN CONDITION
   sectionTitle('15', 'MOVE-IN CONDITION');
-  pdf.text(`${checkbox(doc.asIsCondition)} Tenant accepts Property as-is.`);
-  pdf.text(`Inventory form due within ${field(doc.inventoryDays || '3')} days of possession.`);
+  paragraph(`${checkbox(doc.asIsCondition)} Tenant accepts Property as-is.`);
+  paragraph(`Inventory form due within ${field(doc.inventoryDays || '3')} days of possession.`);
   pdf.moveDown();
 
   // Section 16: MOVE-OUT
   sectionTitle('16', 'MOVE-OUT');
-  pdf.text('Tenant will: return all keys; remove personal property; leave Property in good condition; provide forwarding address.');
+  paragraph('Tenant will: return all keys; remove personal property; leave Property in good condition; provide forwarding address.');
   pdf.moveDown();
 
   // Section 17: PROPERTY MAINTENANCE
@@ -1079,64 +1106,64 @@ function generatePDF(doc, res) {
 
   // Section 19-25: Condensed legal sections
   sectionTitle('19', 'SECURITY DEVICES');
-  pdf.text('Per Texas Property Code 92.153. Rekeying costs paid by: ' + (doc.rekeyPaidByLandlord ? 'Landlord' : 'Tenant'));
+  paragraph('Per Texas Property Code 92.153. Rekeying costs paid by: ' + (doc.rekeyPaidByLandlord ? 'Landlord' : 'Tenant'));
   pdf.moveDown();
 
   sectionTitle('20', 'SMOKE ALARMS');
-  pdf.text('Landlord installs per code. Tenant tests monthly and replaces batteries.');
+  paragraph('Landlord installs per code. Tenant tests monthly and replaces batteries.');
   pdf.moveDown();
 
   sectionTitle('21', 'LIABILITY');
-  pdf.text('Landlord not liable for damages from utility failure, weather, crime, or Property conditions. Tenant releases Landlord.');
+  paragraph('Landlord not liable for damages from utility failure, weather, crime, or Property conditions. Tenant releases Landlord.');
   pdf.moveDown();
 
   sectionTitle('22', 'HOLDOVER');
-  pdf.text(`If Tenant remains after expiration: ${money(doc.holdoverRent || (doc.monthlyRent ? doc.monthlyRent * 3 : 0))} per month until surrender.`);
+  paragraph(`If Tenant remains after expiration: ${money(doc.holdoverRent || (doc.monthlyRent ? doc.monthlyRent * 3 : 0))} per month until surrender.`);
   pdf.moveDown();
 
   sectionTitle('23', 'LANDLORD\'S LIEN');
-  pdf.text('Per Texas Property Code 54.021. Certain items exempt.');
+  paragraph('Per Texas Property Code 54.021. Certain items exempt.');
   pdf.moveDown();
 
   sectionTitle('24', 'SUBORDINATION');
-  pdf.text('This lease subordinate to existing or future mortgages and liens.');
+  paragraph('This lease subordinate to existing or future mortgages and liens.');
   pdf.moveDown();
 
   sectionTitle('25', 'CASUALTY LOSS');
-  pdf.text('Per Texas Property Code 92.054 if Property becomes unfit.');
+  paragraph('Per Texas Property Code 92.054 if Property becomes unfit.');
   pdf.moveDown();
 
   // Section 26: SPECIAL PROVISIONS
   sectionTitle('26', 'SPECIAL PROVISIONS');
   if (doc.specialProvisions) {
     doc.specialProvisions.split('\n').filter(p => p.trim()).forEach((p, i) => {
-      pdf.text(`${String.fromCharCode(97 + i)}. ${p.trim()}`);
+      paragraph(`${String.fromCharCode(97 + i)}. ${p.trim()}`);
     });
   } else {
-    pdf.text('None.');
+    paragraph('None.');
   }
   pdf.moveDown();
 
   // Section 27-30: Legal condensed
   sectionTitle('27', 'DEFAULT');
-  pdf.text('Tenant default includes: nonpayment, abandonment, lease violations, false statements. Landlord may terminate, accelerate rent, sue for damages and attorney\'s fees. Interest at 18% on past-due amounts.');
+  paragraph('Tenant default includes: nonpayment, abandonment, lease violations, false statements. Landlord may terminate, accelerate rent, sue for damages and attorney\'s fees. Interest at 18% on past-due amounts.');
   pdf.moveDown();
 
   sectionTitle('28', 'EARLY TERMINATION');
-  pdf.text('Permitted for: military deployment (30 days notice), family violence (per Texas Property Code Ch. 92), sex offenses/stalking victims.');
+  paragraph('Permitted for: military deployment (30 days notice), family violence (per Texas Property Code Ch. 92), sex offenses/stalking victims.');
   pdf.moveDown();
 
   sectionTitle('29', 'ATTORNEY\'S FEES');
-  pdf.text('Prevailing party may recover reasonable attorney\'s fees.');
+  paragraph('Prevailing party may recover reasonable attorney\'s fees.');
   pdf.moveDown();
 
   sectionTitle('30', 'REPRESENTATIONS');
-  pdf.text('False statements by Tenant may result in lease termination.');
+  paragraph('False statements by Tenant may result in lease termination.');
   pdf.moveDown();
 
   // Section 31: ADDENDA
   sectionTitle('31', 'ADDENDA');
-  pdf.text([
+  paragraph([
     doc.addendumFlood ? '[X] Flood Disclosure' : '[ ] Flood Disclosure',
     doc.addendumLeadPaint ? '[X] Lead-Based Paint' : '[ ] Lead-Based Paint',
     doc.addendumInventory ? '[X] Inventory Form' : '[ ] Inventory Form',
@@ -1146,71 +1173,86 @@ function generatePDF(doc, res) {
 
   // Section 32: NOTICES
   sectionTitle('32', 'NOTICES');
-  pdf.text(`Landlord: ${field(doc.landlordName)}, ${field(doc.landlordAddress || doc.paymentAddress)}, ${field(doc.landlordEmail)}`);
-  pdf.text(`Tenant: ${field(doc.propertyAddress)}, ${field(doc.tenantEmail)}`);
+  paragraph(`Landlord: ${field(doc.landlordName)}, ${field(doc.landlordAddress || doc.paymentAddress)}, ${field(doc.landlordEmail)}`);
+  paragraph(`Tenant: ${field(doc.propertyAddress)}, ${field(doc.tenantEmail)}`);
   pdf.moveDown();
 
   // Section 33: AGREEMENT
   sectionTitle('33', 'AGREEMENT OF PARTIES');
-  pdf.text('Entire agreement. Binding on heirs/successors. Joint and several liability. Texas law governs.');
+  paragraph('Entire agreement. Binding on heirs/successors. Joint and several liability. Texas law governs.');
   pdf.moveDown(2);
 
   // ===== SIGNATURE PAGE =====
   checkSpace(300);
-  pdf.font('Helvetica-Bold').fontSize(14).text('EXECUTION', { align: 'center' });
+  resetX();
+  pdf.font('Helvetica-Bold').fontSize(14).text('EXECUTION', leftMargin, pdf.y, { width: textWidth, align: 'center' });
   pdf.moveDown(0.5);
-  pdf.font('Helvetica').fontSize(9).text('By signing, each party acknowledges this lease is binding and enforceable.', { align: 'center' });
+  resetX();
+  pdf.font('Helvetica').fontSize(9).text('By signing, each party acknowledges this lease is binding and enforceable.', { width: textWidth, align: 'center' });
   pdf.moveDown(2);
+  resetX();
 
   // Landlord Signature
-  pdf.font('Helvetica-Bold').fontSize(11).text('LANDLORD:');
+  pdf.font('Helvetica-Bold').fontSize(11).text('LANDLORD:', { width: textWidth });
   pdf.moveDown(0.5);
+  resetX();
   if (doc.landlordSignature) {
     try {
       const imgData = doc.landlordSignature.replace(/^data:image\/\w+;base64,/, '');
-      pdf.image(Buffer.from(imgData, 'base64'), { width: 200, height: 60 });
+      pdf.image(Buffer.from(imgData, 'base64'), leftMargin, pdf.y, { width: 200, height: 60 });
+      pdf.y += 65;
     } catch (e) {
-      pdf.font('Helvetica-Oblique').fontSize(10).text('[Electronic Signature on file]');
+      pdf.font('Helvetica-Oblique').fontSize(10).text('[Electronic Signature on file]', { width: textWidth });
     }
+    resetX();
     pdf.font('Helvetica').fontSize(9);
-    pdf.text(`Signed: ${doc.landlordName} on ${new Date(doc.landlordSignedAt).toLocaleString()}`);
-    pdf.text(`IP: ${doc.landlordSignedIp}`);
+    paragraph(`Signed: ${doc.landlordName} on ${new Date(doc.landlordSignedAt).toLocaleString()}`);
+    paragraph(`IP: ${doc.landlordSignedIp}`);
   } else {
-    pdf.text('________________________________________     ________________');
-    pdf.text('Signature                                                              Date');
+    paragraph('________________________________________     ________________');
+    paragraph('Signature                                                              Date');
   }
-  pdf.text(`Name: ${field(doc.landlordName)}`);
+  paragraph(`Name: ${field(doc.landlordName)}`);
   pdf.moveDown(2);
 
   // Tenant Signature
-  pdf.font('Helvetica-Bold').fontSize(11).text('TENANT:');
+  resetX();
+  pdf.font('Helvetica-Bold').fontSize(11).text('TENANT:', { width: textWidth });
   pdf.moveDown(0.5);
+  resetX();
   if (doc.tenantSignature) {
     try {
       const imgData = doc.tenantSignature.replace(/^data:image\/\w+;base64,/, '');
-      pdf.image(Buffer.from(imgData, 'base64'), { width: 200, height: 60 });
+      pdf.image(Buffer.from(imgData, 'base64'), leftMargin, pdf.y, { width: 200, height: 60 });
+      pdf.y += 65;
     } catch (e) {
-      pdf.font('Helvetica-Oblique').fontSize(10).text('[Electronic Signature on file]');
+      pdf.font('Helvetica-Oblique').fontSize(10).text('[Electronic Signature on file]', { width: textWidth });
     }
+    resetX();
     pdf.font('Helvetica').fontSize(9);
-    pdf.text(`Signed: ${doc.tenantName} on ${new Date(doc.tenantSignedAt).toLocaleString()}`);
-    pdf.text(`IP: ${doc.tenantSignedIp}`);
+    paragraph(`Signed: ${doc.tenantName} on ${new Date(doc.tenantSignedAt).toLocaleString()}`);
+    paragraph(`IP: ${doc.tenantSignedIp}`);
   } else {
-    pdf.text('________________________________________     ________________');
-    pdf.text('Signature                                                              Date');
+    paragraph('________________________________________     ________________');
+    paragraph('Signature                                                              Date');
   }
-  pdf.text(`Name: ${field(doc.tenantName)}`);
+  paragraph(`Name: ${field(doc.tenantName)}`);
 
   // E-Sign Certificate
   pdf.moveDown(3);
-  pdf.font('Helvetica-Bold').fontSize(10).text('CERTIFICATE OF ELECTRONIC SIGNING', { align: 'center' });
+  resetX();
+  pdf.font('Helvetica-Bold').fontSize(10).text('CERTIFICATE OF ELECTRONIC SIGNING', leftMargin, pdf.y, { width: textWidth, align: 'center' });
+  resetX();
   pdf.font('Helvetica').fontSize(8).fillColor('#444444');
-  pdf.text('This document was signed electronically via LeaseSign. Electronic signatures are legally binding under ESIGN Act and UETA.', { align: 'center' });
+  pdf.text('This document was signed electronically via LeaseSign. Electronic signatures are legally binding under ESIGN Act and UETA.', { width: textWidth, align: 'center' });
   pdf.moveDown();
+  resetX();
   pdf.fillColor('#666666');
-  pdf.text(`Document ID: ${doc.id}`, { align: 'center' });
-  pdf.text(`Generated: ${new Date().toISOString()}`, { align: 'center' });
-  pdf.text(`Status: ${doc.status === 'completed' ? 'FULLY EXECUTED' : 'PENDING SIGNATURES'}`, { align: 'center' });
+  pdf.text(`Document ID: ${doc.id}`, { width: textWidth, align: 'center' });
+  resetX();
+  pdf.text(`Generated: ${new Date().toISOString()}`, { width: textWidth, align: 'center' });
+  resetX();
+  pdf.text(`Status: ${doc.status === 'completed' ? 'FULLY EXECUTED' : 'PENDING SIGNATURES'}`, { width: textWidth, align: 'center' });
 
   addFooter();
   pdf.end();
@@ -1285,7 +1327,7 @@ function generateSignEmail(doc, signerType, signUrl) {
 </html>`;
 }
 
-// Generate PDF as buffer for email attachment
+// Generate PDF as buffer for email attachment (reuses generatePDFContent)
 function generatePDFBuffer(doc) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -1295,97 +1337,7 @@ function generatePDFBuffer(doc) {
     pdf.on('end', () => resolve(Buffer.concat(chunks)));
     pdf.on('error', reject);
 
-    // Helper functions
-    const field = (val) => val || '________________________';
-    const money = (val) => val ? `$${parseFloat(val).toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '$____________';
-    const checkbox = (checked) => checked ? '[X]' : '[ ]';
-
-    // Title
-    pdf.font('Helvetica-Bold').fontSize(16).text('RESIDENTIAL LEASE', { align: 'center' });
-    pdf.font('Helvetica').fontSize(8).text('Texas Association of REALTORS - Fully Executed', { align: 'center' });
-    pdf.moveDown(2);
-
-    // Parties
-    pdf.font('Helvetica-Bold').fontSize(11).text('1. PARTIES');
-    pdf.font('Helvetica').fontSize(10);
-    pdf.text(`Landlord: ${field(doc.landlordName)} (${field(doc.landlordEmail)})`);
-    pdf.text(`Tenant: ${field(doc.tenantName)} (${field(doc.tenantEmail)})`);
-    pdf.moveDown();
-
-    // Property
-    pdf.font('Helvetica-Bold').fontSize(11).text('2. PROPERTY');
-    pdf.font('Helvetica').fontSize(10);
-    pdf.text(`Address: ${field(doc.propertyAddress)}, ${field(doc.propertyCity)}, TX ${field(doc.propertyZip)}`);
-    pdf.text(`County: ${field(doc.propertyCounty)}`);
-    pdf.moveDown();
-
-    // Term
-    pdf.font('Helvetica-Bold').fontSize(11).text('3. LEASE TERM');
-    pdf.font('Helvetica').fontSize(10);
-    pdf.text(`Start Date: ${field(doc.commencementDate)}`);
-    pdf.text(`End Date: ${field(doc.expirationDate)}`);
-    pdf.moveDown();
-
-    // Rent
-    pdf.font('Helvetica-Bold').fontSize(11).text('4. RENT');
-    pdf.font('Helvetica').fontSize(10);
-    pdf.text(`Monthly Rent: ${money(doc.monthlyRent)}`);
-    pdf.text(`Security Deposit: ${money(doc.securityDeposit)}`);
-    pdf.text(`Late Fee: ${money(doc.initialLateFee)} initial, ${money(doc.dailyLateFee)}/day after grace period`);
-    pdf.moveDown();
-
-    // Special Provisions
-    if (doc.specialProvisions) {
-      pdf.font('Helvetica-Bold').fontSize(11).text('5. SPECIAL PROVISIONS');
-      pdf.font('Helvetica').fontSize(10);
-      pdf.text(doc.specialProvisions);
-      pdf.moveDown();
-    }
-
-    // Signatures
-    pdf.moveDown(2);
-    pdf.font('Helvetica-Bold').fontSize(14).text('SIGNATURES', { align: 'center' });
-    pdf.moveDown();
-
-    // Landlord Signature
-    pdf.font('Helvetica-Bold').fontSize(11).text('LANDLORD:');
-    if (doc.landlordSignature) {
-      try {
-        const imgData = doc.landlordSignature.replace(/^data:image\/\w+;base64,/, '');
-        pdf.image(Buffer.from(imgData, 'base64'), { width: 150, height: 50 });
-      } catch (e) {
-        pdf.font('Helvetica-Oblique').fontSize(10).text('[Electronic Signature]');
-      }
-      pdf.font('Helvetica').fontSize(9);
-      pdf.text(`Signed: ${doc.landlordName} on ${new Date(doc.landlordSignedAt).toLocaleString()}`);
-      pdf.text(`IP: ${doc.landlordSignedIp}`);
-    }
-    pdf.moveDown();
-
-    // Tenant Signature
-    pdf.font('Helvetica-Bold').fontSize(11).text('TENANT:');
-    if (doc.tenantSignature) {
-      try {
-        const imgData = doc.tenantSignature.replace(/^data:image\/\w+;base64,/, '');
-        pdf.image(Buffer.from(imgData, 'base64'), { width: 150, height: 50 });
-      } catch (e) {
-        pdf.font('Helvetica-Oblique').fontSize(10).text('[Electronic Signature]');
-      }
-      pdf.font('Helvetica').fontSize(9);
-      pdf.text(`Signed: ${doc.tenantName} on ${new Date(doc.tenantSignedAt).toLocaleString()}`);
-      pdf.text(`IP: ${doc.tenantSignedIp}`);
-    }
-
-    // Certificate
-    pdf.moveDown(2);
-    pdf.font('Helvetica-Bold').fontSize(10).text('CERTIFICATE OF COMPLETION', { align: 'center' });
-    pdf.font('Helvetica').fontSize(8).fillColor('#666666');
-    pdf.text('This document was electronically signed via LeaseSign.', { align: 'center' });
-    pdf.text(`Document ID: ${doc.id}`, { align: 'center' });
-    pdf.text(`Completed: ${new Date().toISOString()}`, { align: 'center' });
-    pdf.text('Status: FULLY EXECUTED', { align: 'center' });
-
-    pdf.end();
+    generatePDFContent(pdf, doc);
   });
 }
 
