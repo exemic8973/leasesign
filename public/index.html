@@ -1729,7 +1729,23 @@
                 } catch (e) { toast(e.message, 'error'); }
             };
             
-            const downloadPdf = () => window.open(`/api/documents/${doc.id}/pdf`, '_blank');
+            const downloadPdf = async () => {
+                try {
+                    const response = await fetch(`/api/documents/${doc.id}/pdf`, {
+                        headers: { 'Authorization': `Bearer ${api.token}` }
+                    });
+                    if (!response.ok) throw new Error('Failed to download PDF');
+                    const blob = await response.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `Lease_${(doc.propertyAddress || 'document').replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                } catch (e) { toast(e.message, 'error'); }
+            };
 
             // Regenerate expired signing link
             const regenerateLink = async () => {
