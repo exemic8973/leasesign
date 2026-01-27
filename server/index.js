@@ -939,13 +939,12 @@ function generatePDFContent(pdf, doc) {
     resetX();
   };
 
-  const checkSpace = (needed = 50) => {
-    // Only create new page if we're very close to the bottom (within 60 points of footer)
-    if (pdf.y > pdf.page.height - 60 - needed) newPage();
+  // Only use checkSpace for signature section - let PDFKit handle normal content flow
+  const checkSpace = (needed) => {
+    if (pdf.y > pdf.page.height - 50 - needed) newPage();
   };
 
   const sectionTitle = (num, title) => {
-    checkSpace(30);
     resetX();
     pdf.font('Helvetica-Bold').fontSize(10).fillColor('#000000');
     pdf.text(`${num}. ${title}`, { width: textWidth });
@@ -960,7 +959,6 @@ function generatePDFContent(pdf, doc) {
   };
 
   const subSection = (letter, text) => {
-    checkSpace(20);
     resetX();
     pdf.font('Helvetica-Bold').fontSize(9).text(`${letter}. `, { continued: true, width: textWidth });
     pdf.font('Helvetica').fontSize(9).text(text, { width: textWidth - 20 });
@@ -1181,58 +1179,52 @@ function generatePDFContent(pdf, doc) {
   // Section 33: AGREEMENT
   sectionTitle('33', 'AGREEMENT OF PARTIES');
   paragraph('Entire agreement. Binding on heirs/successors. Joint and several liability. Texas law governs.');
-  pdf.moveDown(2);
+  pdf.moveDown();
 
-  // ===== SIGNATURE PAGE =====
-  checkSpace(150);
+  // ===== SIGNATURE SECTION =====
   resetX();
-  pdf.font('Helvetica-Bold').fontSize(14).text('EXECUTION', leftMargin, pdf.y, { width: textWidth, align: 'center' });
-  pdf.moveDown(0.5);
+  pdf.font('Helvetica-Bold').fontSize(12).text('EXECUTION', leftMargin, pdf.y, { width: textWidth, align: 'center' });
   resetX();
   pdf.font('Helvetica').fontSize(9).text('By signing, each party acknowledges this lease is binding and enforceable.', { width: textWidth, align: 'center' });
-  pdf.moveDown(2);
+  pdf.moveDown();
   resetX();
 
   // Landlord Signature
-  pdf.font('Helvetica-Bold').fontSize(11).text('LANDLORD:', { width: textWidth });
-  pdf.moveDown(0.5);
+  pdf.font('Helvetica-Bold').fontSize(10).text('LANDLORD:', { width: textWidth });
   resetX();
   if (doc.landlordSignature) {
     try {
       const imgData = doc.landlordSignature.replace(/^data:image\/\w+;base64,/, '');
-      pdf.image(Buffer.from(imgData, 'base64'), leftMargin, pdf.y, { width: 200, height: 60 });
-      pdf.y += 65;
+      pdf.image(Buffer.from(imgData, 'base64'), leftMargin, pdf.y, { width: 150, height: 45 });
+      pdf.y += 50;
     } catch (e) {
-      pdf.font('Helvetica-Oblique').fontSize(10).text('[Electronic Signature on file]', { width: textWidth });
+      pdf.font('Helvetica-Oblique').fontSize(9).text('[Electronic Signature on file]', { width: textWidth });
     }
     resetX();
-    pdf.font('Helvetica').fontSize(9);
-    paragraph(`Signed: ${doc.landlordName} on ${new Date(doc.landlordSignedAt).toLocaleString()}`);
-    paragraph(`IP: ${doc.landlordSignedIp}`);
+    pdf.font('Helvetica').fontSize(8);
+    paragraph(`Signed: ${doc.landlordName} on ${new Date(doc.landlordSignedAt).toLocaleString()} | IP: ${doc.landlordSignedIp}`);
   } else {
     paragraph('________________________________________     ________________');
     paragraph('Signature                                                              Date');
   }
   paragraph(`Name: ${field(doc.landlordName)}`);
-  pdf.moveDown(2);
+  pdf.moveDown();
 
   // Tenant Signature
   resetX();
-  pdf.font('Helvetica-Bold').fontSize(11).text('TENANT:', { width: textWidth });
-  pdf.moveDown(0.5);
+  pdf.font('Helvetica-Bold').fontSize(10).text('TENANT:', { width: textWidth });
   resetX();
   if (doc.tenantSignature) {
     try {
       const imgData = doc.tenantSignature.replace(/^data:image\/\w+;base64,/, '');
-      pdf.image(Buffer.from(imgData, 'base64'), leftMargin, pdf.y, { width: 200, height: 60 });
-      pdf.y += 65;
+      pdf.image(Buffer.from(imgData, 'base64'), leftMargin, pdf.y, { width: 150, height: 45 });
+      pdf.y += 50;
     } catch (e) {
-      pdf.font('Helvetica-Oblique').fontSize(10).text('[Electronic Signature on file]', { width: textWidth });
+      pdf.font('Helvetica-Oblique').fontSize(9).text('[Electronic Signature on file]', { width: textWidth });
     }
     resetX();
-    pdf.font('Helvetica').fontSize(9);
-    paragraph(`Signed: ${doc.tenantName} on ${new Date(doc.tenantSignedAt).toLocaleString()}`);
-    paragraph(`IP: ${doc.tenantSignedIp}`);
+    pdf.font('Helvetica').fontSize(8);
+    paragraph(`Signed: ${doc.tenantName} on ${new Date(doc.tenantSignedAt).toLocaleString()} | IP: ${doc.tenantSignedIp}`);
   } else {
     paragraph('________________________________________     ________________');
     paragraph('Signature                                                              Date');
@@ -1240,7 +1232,7 @@ function generatePDFContent(pdf, doc) {
   paragraph(`Name: ${field(doc.tenantName)}`);
 
   // E-Sign Certificate
-  pdf.moveDown(3);
+  pdf.moveDown();
   resetX();
   pdf.font('Helvetica-Bold').fontSize(10).text('CERTIFICATE OF ELECTRONIC SIGNING', leftMargin, pdf.y, { width: textWidth, align: 'center' });
   resetX();
