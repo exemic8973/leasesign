@@ -286,6 +286,381 @@
             return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d={paths[name]}/></svg>;
         };
 
+        // Language System
+        const translations = {
+            en: {
+                // App
+                appName: 'LeaseSign',
+                loading: 'Loading...',
+
+                // Auth
+                login: 'Login',
+                register: 'Register',
+                email: 'Email',
+                password: 'Password',
+                name: 'Full Name',
+                company: 'Company (Optional)',
+                phone: 'Phone (Optional)',
+                signIn: 'Sign In',
+                createAccount: 'Create Account',
+                noAccount: "Don't have an account?",
+                haveAccount: 'Already have an account?',
+                forgotPassword: 'Forgot password?',
+                resetPassword: 'Reset Password',
+                resetPasswordDesc: "Enter your email and we'll send you a reset link",
+                backToLogin: 'Back to Login',
+                resetSent: 'If an account exists with that email, a reset link has been sent.',
+                newPassword: 'New Password',
+                confirmPassword: 'Confirm Password',
+                setNewPassword: 'Set New Password',
+                passwordReset: 'Password Reset',
+                passwordResetSuccess: 'Your password has been reset. You can now login.',
+
+                // Navigation
+                dashboard: 'Dashboard',
+                documents: 'Documents',
+                drafts: 'Drafts',
+                pending: 'Pending',
+                completed: 'Completed',
+                templates: 'Templates',
+                analytics: 'Analytics',
+                notifications: 'Notifications',
+                profile: 'Profile',
+                logout: 'Logout',
+
+                // Dashboard
+                welcomeBack: 'Welcome back',
+                overview: 'Overview',
+                totalDocuments: 'Total Documents',
+                awaitingSignature: 'Awaiting Signature',
+                completedDocs: 'Completed',
+                last30Days: 'Last 30 Days',
+                recentDocuments: 'Recent Documents',
+                viewAll: 'View All',
+                noDocuments: 'No documents yet',
+                createFirstDoc: 'Create your first lease document to get started.',
+
+                // Documents
+                newDocument: 'New Document',
+                allDocuments: 'All Documents',
+                searchDocuments: 'Search documents...',
+                filter: 'Filter',
+                all: 'All',
+                draft: 'Draft',
+                awaitingSignatures: 'Awaiting Signatures',
+                partiallySigned: 'Partially Signed',
+                voided: 'Voided',
+                noResults: 'No documents found',
+                tryDifferentSearch: 'Try a different search or filter.',
+
+                // Document Form
+                createLease: 'Create New Lease',
+                editLease: 'Edit Lease',
+                propertyInfo: 'Property Information',
+                propertyAddress: 'Property Address',
+                city: 'City',
+                zipCode: 'ZIP Code',
+                county: 'County',
+                landlordInfo: 'Landlord Information',
+                landlordName: 'Landlord Name',
+                landlordEmail: 'Landlord Email',
+                landlordPhone: 'Landlord Phone',
+                tenantInfo: 'Tenant Information',
+                tenantName: 'Tenant Name',
+                tenantEmail: 'Tenant Email',
+                tenantPhone: 'Tenant Phone',
+                leaseTerms: 'Lease Terms',
+                startDate: 'Start Date',
+                endDate: 'End Date',
+                monthlyRent: 'Monthly Rent',
+                securityDeposit: 'Security Deposit',
+                additionalTerms: 'Additional Terms',
+                specialProvisions: 'Special Provisions',
+                cancel: 'Cancel',
+                saveDraft: 'Save Draft',
+                saveAndSend: 'Save & Send for Signatures',
+
+                // Document Detail
+                documentDetails: 'Document Details',
+                createdOn: 'Created',
+                lastUpdated: 'Last Updated',
+                actions: 'Actions',
+                edit: 'Edit',
+                duplicate: 'Duplicate',
+                sendReminder: 'Send Reminder',
+                voidDocument: 'Void Document',
+                downloadPdf: 'Download PDF',
+                deleteDocument: 'Delete',
+                regenerateLink: 'Regenerate Link',
+
+                // Signing
+                signingProgress: 'Signing Progress',
+                landlordSignature: 'Landlord Signature',
+                tenantSignature: 'Tenant Signature',
+                signed: 'Signed',
+                notSigned: 'Not signed yet',
+                signHere: 'Sign here',
+                clear: 'Clear',
+                adoptAndSign: 'Adopt & Sign',
+                signatureDisclaimer: 'By signing, I agree that this electronic signature is the legal equivalent of my manual signature.',
+                thankYouSigning: 'Thank you for signing!',
+                documentSigned: 'The document has been signed successfully.',
+                waitingForOther: 'Waiting for the other party to sign.',
+                allPartiesSigned: 'All parties have signed. The lease is now complete!',
+
+                // Status
+                statusDraft: 'Draft',
+                statusPending: 'Awaiting Signatures',
+                statusPartial: 'Partially Signed',
+                statusCompleted: 'Completed',
+                statusVoided: 'Voided',
+                statusTemplate: 'Template',
+
+                // Notifications
+                markAllRead: 'Mark all read',
+                noNotifications: 'No notifications',
+
+                // Analytics
+                completionRate: 'Completion Rate',
+                avgTimeToComplete: 'Avg. Time to Complete',
+                hours: 'hours',
+                monthlyTrends: 'Monthly Trends',
+                created: 'Created',
+                signingFunnel: 'Signing Funnel',
+                sent: 'Sent',
+                landlordSigned: 'Landlord Signed',
+                fullySigned: 'Fully Signed',
+
+                // Bulk Actions
+                selected: 'selected',
+                sendReminders: 'Send Reminders',
+                bulkDelete: 'Delete',
+
+                // Misc
+                save: 'Save',
+                close: 'Close',
+                confirm: 'Confirm',
+                yes: 'Yes',
+                no: 'No',
+                or: 'or',
+                and: 'and',
+                of: 'of',
+
+                // Language
+                language: 'Language',
+                english: 'English',
+                chinese: '中文'
+            },
+            zh: {
+                // App
+                appName: '签约通',
+                loading: '加载中...',
+
+                // Auth
+                login: '登录',
+                register: '注册',
+                email: '电子邮箱',
+                password: '密码',
+                name: '姓名',
+                company: '公司（选填）',
+                phone: '电话（选填）',
+                signIn: '登录',
+                createAccount: '创建账户',
+                noAccount: '还没有账户？',
+                haveAccount: '已有账户？',
+                forgotPassword: '忘记密码？',
+                resetPassword: '重置密码',
+                resetPasswordDesc: '输入您的邮箱，我们将发送重置链接',
+                backToLogin: '返回登录',
+                resetSent: '如果该邮箱存在账户，重置链接已发送。',
+                newPassword: '新密码',
+                confirmPassword: '确认密码',
+                setNewPassword: '设置新密码',
+                passwordReset: '密码重置',
+                passwordResetSuccess: '您的密码已重置，现在可以登录了。',
+
+                // Navigation
+                dashboard: '仪表板',
+                documents: '文档',
+                drafts: '草稿',
+                pending: '待签署',
+                completed: '已完成',
+                templates: '模板',
+                analytics: '数据分析',
+                notifications: '通知',
+                profile: '个人资料',
+                logout: '退出登录',
+
+                // Dashboard
+                welcomeBack: '欢迎回来',
+                overview: '概览',
+                totalDocuments: '总文档数',
+                awaitingSignature: '待签署',
+                completedDocs: '已完成',
+                last30Days: '近30天',
+                recentDocuments: '最近文档',
+                viewAll: '查看全部',
+                noDocuments: '暂无文档',
+                createFirstDoc: '创建您的第一份租约文档以开始使用。',
+
+                // Documents
+                newDocument: '新建文档',
+                allDocuments: '所有文档',
+                searchDocuments: '搜索文档...',
+                filter: '筛选',
+                all: '全部',
+                draft: '草稿',
+                awaitingSignatures: '待签署',
+                partiallySigned: '部分已签',
+                voided: '已作废',
+                noResults: '未找到文档',
+                tryDifferentSearch: '请尝试其他搜索条件。',
+
+                // Document Form
+                createLease: '创建新租约',
+                editLease: '编辑租约',
+                propertyInfo: '房产信息',
+                propertyAddress: '房产地址',
+                city: '城市',
+                zipCode: '邮编',
+                county: '县/区',
+                landlordInfo: '房东信息',
+                landlordName: '房东姓名',
+                landlordEmail: '房东邮箱',
+                landlordPhone: '房东电话',
+                tenantInfo: '租客信息',
+                tenantName: '租客姓名',
+                tenantEmail: '租客邮箱',
+                tenantPhone: '租客电话',
+                leaseTerms: '租约条款',
+                startDate: '开始日期',
+                endDate: '结束日期',
+                monthlyRent: '月租金',
+                securityDeposit: '押金',
+                additionalTerms: '附加条款',
+                specialProvisions: '特别约定',
+                cancel: '取消',
+                saveDraft: '保存草稿',
+                saveAndSend: '保存并发送签署',
+
+                // Document Detail
+                documentDetails: '文档详情',
+                createdOn: '创建时间',
+                lastUpdated: '最后更新',
+                actions: '操作',
+                edit: '编辑',
+                duplicate: '复制',
+                sendReminder: '发送提醒',
+                voidDocument: '作废文档',
+                downloadPdf: '下载PDF',
+                deleteDocument: '删除',
+                regenerateLink: '重新生成链接',
+
+                // Signing
+                signingProgress: '签署进度',
+                landlordSignature: '房东签名',
+                tenantSignature: '租客签名',
+                signed: '已签署',
+                notSigned: '未签署',
+                signHere: '在此签名',
+                clear: '清除',
+                adoptAndSign: '确认签署',
+                signatureDisclaimer: '签署即表示我同意此电子签名与我的手写签名具有同等法律效力。',
+                thankYouSigning: '感谢您的签署！',
+                documentSigned: '文档已成功签署。',
+                waitingForOther: '等待对方签署。',
+                allPartiesSigned: '所有方已签署，租约现已生效！',
+
+                // Status
+                statusDraft: '草稿',
+                statusPending: '待签署',
+                statusPartial: '部分已签',
+                statusCompleted: '已完成',
+                statusVoided: '已作废',
+                statusTemplate: '模板',
+
+                // Notifications
+                markAllRead: '全部标为已读',
+                noNotifications: '暂无通知',
+
+                // Analytics
+                completionRate: '完成率',
+                avgTimeToComplete: '平均完成时间',
+                hours: '小时',
+                monthlyTrends: '月度趋势',
+                created: '已创建',
+                signingFunnel: '签署漏斗',
+                sent: '已发送',
+                landlordSigned: '房东已签',
+                fullySigned: '全部已签',
+
+                // Bulk Actions
+                selected: '已选择',
+                sendReminders: '发送提醒',
+                bulkDelete: '删除',
+
+                // Misc
+                save: '保存',
+                close: '关闭',
+                confirm: '确认',
+                yes: '是',
+                no: '否',
+                or: '或',
+                and: '和',
+                of: '的',
+
+                // Language
+                language: '语言',
+                english: 'English',
+                chinese: '中文'
+            }
+        };
+
+        // Language Context
+        const LangContext = React.createContext({ lang: 'en', setLang: () => {}, t: (key) => key });
+
+        const useLang = () => React.useContext(LangContext);
+
+        const LangProvider = ({ children }) => {
+            const [lang, setLang] = useState(localStorage.getItem('leasesign_lang') || 'en');
+
+            const changeLang = (newLang) => {
+                setLang(newLang);
+                localStorage.setItem('leasesign_lang', newLang);
+            };
+
+            const t = (key) => translations[lang]?.[key] || translations.en[key] || key;
+
+            return <LangContext.Provider value={{ lang, setLang: changeLang, t }}>{children}</LangContext.Provider>;
+        };
+
+        // Language Switcher Component
+        const LangSwitcher = () => {
+            const { lang, setLang, t } = useLang();
+            const [open, setOpen] = useState(false);
+
+            return (
+                <div className="dropdown" style={{ marginRight: '0.5rem' }}>
+                    <button className="btn btn-ghost btn-sm" onClick={() => setOpen(!open)} style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                        🌐 {lang === 'en' ? 'EN' : '中文'}
+                    </button>
+                    {open && (
+                        <>
+                            <div style={{ position: 'fixed', inset: 0, zIndex: 99 }} onClick={() => setOpen(false)}/>
+                            <div className="dropdown-menu show" style={{ minWidth: '120px' }}>
+                                <div className={`dropdown-item ${lang === 'en' ? 'active' : ''}`} onClick={() => { setLang('en'); setOpen(false); }}>
+                                    🇺🇸 English
+                                </div>
+                                <div className={`dropdown-item ${lang === 'zh' ? 'active' : ''}`} onClick={() => { setLang('zh'); setOpen(false); }}>
+                                    🇨🇳 中文
+                                </div>
+                            </div>
+                        </>
+                    )}
+                </div>
+            );
+        };
+
         // Signature Pad
         function SignaturePad({ onComplete, signerName }) {
             const canvasRef = useRef(null);
@@ -337,13 +712,14 @@
 
         // Status Badge
         const StatusBadge = ({ status }) => {
-            const cfg = { 
-                draft: ['status-draft', 'Draft'], 
-                pending: ['status-pending', 'Awaiting Signatures'], 
-                partial: ['status-partial', 'Partially Signed'], 
-                completed: ['status-completed', 'Completed'],
-                voided: ['status-voided', 'Voided'],
-                template: ['status-template', 'Template']
+            const { t } = useLang();
+            const cfg = {
+                draft: ['status-draft', t('statusDraft')],
+                pending: ['status-pending', t('statusPending')],
+                partial: ['status-partial', t('statusPartial')],
+                completed: ['status-completed', t('statusCompleted')],
+                voided: ['status-voided', t('statusVoided')],
+                template: ['status-template', t('statusTemplate')]
             };
             const [cls, label] = cfg[status] || cfg.draft;
             return <span className={`status-badge ${cls}`}><span className="status-dot"></span>{label}</span>;
@@ -351,6 +727,7 @@
 
         // Login Page
         function LoginPage({ onLogin, onSwitch }) {
+            const { t } = useLang();
             const [email, setEmail] = useState('');
             const [password, setPassword] = useState('');
             const [loading, setLoading] = useState(false);
@@ -384,22 +761,23 @@
                 return (
                     <div className="auth-container">
                         <div className="auth-card">
-                            <div className="auth-logo"><div className="logo" style={{justifyContent:'center'}}><div className="logo-icon">📝</div>LeaseSign</div></div>
-                            <h1 className="auth-title">Reset Password</h1>
+                            <div style={{display:'flex',justifyContent:'flex-end',marginBottom:'1rem'}}><LangSwitcher /></div>
+                            <div className="auth-logo"><div className="logo" style={{justifyContent:'center'}}><div className="logo-icon">📝</div>{t('appName')}</div></div>
+                            <h1 className="auth-title">{t('resetPassword')}</h1>
                             {forgotSent ? (
                                 <>
-                                    <div className="alert alert-success" style={{marginBottom:'1rem'}}><span className="alert-icon">✅</span>If an account exists with that email, a reset link has been sent.</div>
-                                    <button className="btn btn-secondary" style={{width:'100%'}} onClick={() => { setShowForgot(false); setForgotSent(false); }}>Back to Login</button>
+                                    <div className="alert alert-success" style={{marginBottom:'1rem'}}><span className="alert-icon">✅</span>{t('resetSent')}</div>
+                                    <button className="btn btn-secondary" style={{width:'100%'}} onClick={() => { setShowForgot(false); setForgotSent(false); }}>{t('backToLogin')}</button>
                                 </>
                             ) : (
                                 <>
-                                    <p className="auth-subtitle">Enter your email and we'll send you a reset link</p>
+                                    <p className="auth-subtitle">{t('resetPasswordDesc')}</p>
                                     {error && <div className="alert alert-danger"><span className="alert-icon">⚠️</span>{error}</div>}
                                     <form onSubmit={submitForgot}>
-                                        <div className="form-group" style={{marginBottom:'1rem'}}><label>Email</label><input type="email" value={forgotEmail} onChange={e=>setForgotEmail(e.target.value)} required/></div>
-                                        <button type="submit" className="btn btn-primary btn-lg" style={{width:'100%',marginBottom:'1rem'}} disabled={loading}>{loading ? 'Sending...' : 'Send Reset Link'}</button>
+                                        <div className="form-group" style={{marginBottom:'1rem'}}><label>{t('email')}</label><input type="email" value={forgotEmail} onChange={e=>setForgotEmail(e.target.value)} required/></div>
+                                        <button type="submit" className="btn btn-primary btn-lg" style={{width:'100%',marginBottom:'1rem'}} disabled={loading}>{loading ? '...' : t('resetPassword')}</button>
                                     </form>
-                                    <button className="btn btn-secondary" style={{width:'100%'}} onClick={() => setShowForgot(false)}>Back to Login</button>
+                                    <button className="btn btn-secondary" style={{width:'100%'}} onClick={() => setShowForgot(false)}>{t('backToLogin')}</button>
                                 </>
                             )}
                         </div>
@@ -410,17 +788,18 @@
             return (
                 <div className="auth-container">
                     <div className="auth-card">
-                        <div className="auth-logo"><div className="logo" style={{justifyContent:'center'}}><div className="logo-icon">📝</div>LeaseSign</div></div>
-                        <h1 className="auth-title">Welcome back</h1>
-                        <p className="auth-subtitle">Sign in to manage your lease documents</p>
+                        <div style={{display:'flex',justifyContent:'flex-end',marginBottom:'1rem'}}><LangSwitcher /></div>
+                        <div className="auth-logo"><div className="logo" style={{justifyContent:'center'}}><div className="logo-icon">📝</div>{t('appName')}</div></div>
+                        <h1 className="auth-title">{t('welcomeBack')}</h1>
+                        <p className="auth-subtitle">{t('login')}</p>
                         {error && <div className="alert alert-danger"><span className="alert-icon">⚠️</span>{error}</div>}
                         <form onSubmit={submit}>
-                            <div className="form-group" style={{marginBottom:'1rem'}}><label>Email</label><input type="email" value={email} onChange={e=>setEmail(e.target.value)} required/></div>
-                            <div className="form-group" style={{marginBottom:'0.5rem'}}><label>Password</label><input type="password" value={password} onChange={e=>setPassword(e.target.value)} required/></div>
-                            <div style={{textAlign:'right',marginBottom:'1rem'}}><a style={{fontSize:'0.875rem',color:'var(--primary)',cursor:'pointer'}} onClick={() => setShowForgot(true)}>Forgot password?</a></div>
-                            <button type="submit" className="btn btn-primary btn-lg" style={{width:'100%'}} disabled={loading}>{loading ? 'Signing in...' : 'Sign In'}</button>
+                            <div className="form-group" style={{marginBottom:'1rem'}}><label>{t('email')}</label><input type="email" value={email} onChange={e=>setEmail(e.target.value)} required/></div>
+                            <div className="form-group" style={{marginBottom:'0.5rem'}}><label>{t('password')}</label><input type="password" value={password} onChange={e=>setPassword(e.target.value)} required/></div>
+                            <div style={{textAlign:'right',marginBottom:'1rem'}}><a style={{fontSize:'0.875rem',color:'var(--primary)',cursor:'pointer'}} onClick={() => setShowForgot(true)}>{t('forgotPassword')}</a></div>
+                            <button type="submit" className="btn btn-primary btn-lg" style={{width:'100%'}} disabled={loading}>{loading ? '...' : t('signIn')}</button>
                         </form>
-                        <div className="auth-footer">Don't have an account? <a onClick={onSwitch}>Create one</a></div>
+                        <div className="auth-footer">{t('noAccount')} <a onClick={onSwitch}>{t('register')}</a></div>
                     </div>
                 </div>
             );
@@ -428,6 +807,7 @@
 
         // Register Page
         function RegisterPage({ onRegister, onSwitch }) {
+            const { t } = useLang();
             const [form, setForm] = useState({ email: '', password: '', name: '', company: '', phone: '' });
             const [loading, setLoading] = useState(false);
             const [error, setError] = useState('');
@@ -446,19 +826,20 @@
             return (
                 <div className="auth-container">
                     <div className="auth-card">
-                        <div className="auth-logo"><div className="logo" style={{justifyContent:'center'}}><div className="logo-icon">📝</div>LeaseSign</div></div>
-                        <h1 className="auth-title">Create account</h1>
-                        <p className="auth-subtitle">Start managing lease documents today</p>
+                        <div style={{display:'flex',justifyContent:'flex-end',marginBottom:'1rem'}}><LangSwitcher /></div>
+                        <div className="auth-logo"><div className="logo" style={{justifyContent:'center'}}><div className="logo-icon">📝</div>{t('appName')}</div></div>
+                        <h1 className="auth-title">{t('createAccount')}</h1>
+                        <p className="auth-subtitle">{t('register')}</p>
                         {error && <div className="alert alert-danger"><span className="alert-icon">⚠️</span>{error}</div>}
                         <form onSubmit={submit}>
-                            <div className="form-group" style={{marginBottom:'1rem'}}><label>Full Name *</label><input value={form.name} onChange={e=>setForm({...form,name:e.target.value})} required/></div>
-                            <div className="form-group" style={{marginBottom:'1rem'}}><label>Email *</label><input type="email" value={form.email} onChange={e=>setForm({...form,email:e.target.value})} required/></div>
-                            <div className="form-group" style={{marginBottom:'1rem'}}><label>Password *</label><input type="password" value={form.password} onChange={e=>setForm({...form,password:e.target.value})} required minLength={6}/></div>
-                            <div className="form-group" style={{marginBottom:'1rem'}}><label>Company</label><input value={form.company} onChange={e=>setForm({...form,company:e.target.value})}/></div>
-                            <div className="form-group" style={{marginBottom:'1rem'}}><label>Phone</label><input value={form.phone} onChange={e=>setForm({...form,phone:e.target.value})}/></div>
-                            <button type="submit" className="btn btn-primary btn-lg" style={{width:'100%'}} disabled={loading}>{loading ? 'Creating...' : 'Create Account'}</button>
+                            <div className="form-group" style={{marginBottom:'1rem'}}><label>{t('name')} *</label><input value={form.name} onChange={e=>setForm({...form,name:e.target.value})} required/></div>
+                            <div className="form-group" style={{marginBottom:'1rem'}}><label>{t('email')} *</label><input type="email" value={form.email} onChange={e=>setForm({...form,email:e.target.value})} required/></div>
+                            <div className="form-group" style={{marginBottom:'1rem'}}><label>{t('password')} *</label><input type="password" value={form.password} onChange={e=>setForm({...form,password:e.target.value})} required minLength={6}/></div>
+                            <div className="form-group" style={{marginBottom:'1rem'}}><label>{t('company')}</label><input value={form.company} onChange={e=>setForm({...form,company:e.target.value})}/></div>
+                            <div className="form-group" style={{marginBottom:'1rem'}}><label>{t('phone')}</label><input value={form.phone} onChange={e=>setForm({...form,phone:e.target.value})}/></div>
+                            <button type="submit" className="btn btn-primary btn-lg" style={{width:'100%'}} disabled={loading}>{loading ? '...' : t('createAccount')}</button>
                         </form>
-                        <div className="auth-footer">Already have an account? <a onClick={onSwitch}>Sign in</a></div>
+                        <div className="auth-footer">{t('haveAccount')} <a onClick={onSwitch}>{t('signIn')}</a></div>
                     </div>
                 </div>
             );
@@ -1196,6 +1577,7 @@
 
         // Dashboard
         function Dashboard({ user, onLogout }) {
+            const { t } = useLang();
             const [view, setView] = useState('dashboard');
             const [docs, setDocs] = useState([]);
             const [templates, setTemplates] = useState([]);
@@ -1456,6 +1838,8 @@
                         <div className="logo" onClick={() => { setView('dashboard'); setDoc(null); setMobileMenuOpen(false); }}><div className="logo-icon">📝</div>LeaseSign</div>
                     </div>
                     <div style={{display:'flex',alignItems:'center',gap:'0.5rem'}}>
+                        {/* Language Switcher */}
+                        <LangSwitcher />
                         {/* Notification Bell */}
                         <div className="notification-bell" style={{position:'relative'}}>
                             <button className="btn btn-secondary btn-icon" onClick={() => { setShowNotifications(!showNotifications); setMenuOpen(false); }} style={{background:'transparent',border:'none'}}>
@@ -1464,12 +1848,12 @@
                             </button>
                             {showNotifications && <div className="notification-panel">
                                 <div className="notification-header">
-                                    <strong>Notifications</strong>
-                                    {unreadCount > 0 && <button className="btn btn-sm" onClick={markAllNotificationsRead}>Mark all read</button>}
+                                    <strong>{t('notifications')}</strong>
+                                    {unreadCount > 0 && <button className="btn btn-sm" onClick={markAllNotificationsRead}>{t('markAllRead')}</button>}
                                 </div>
                                 <div className="notification-list">
                                     {notifications.length === 0 ? (
-                                        <div className="notification-empty">No notifications yet</div>
+                                        <div className="notification-empty">{t('noNotifications')}</div>
                                     ) : notifications.slice(0, 10).map(n => (
                                         <div key={n.id} className={`notification-item ${!n.read ? 'unread' : ''}`} onClick={() => { markNotificationRead(n.id); if (n.documentId) { const d = docs.find(x => x.id === n.documentId); if (d) { setDoc(d); setView('detail'); setShowNotifications(false); } } }}>
                                             <div style={{fontWeight:n.read?400:600,marginBottom:'0.25rem'}}>{n.title}</div>
@@ -1487,7 +1871,7 @@
                                 <span style={{fontWeight:500}}>{user.name}</span>
                             </button>
                             {menuOpen && <div className="user-dropdown">
-                                <button className="user-dropdown-item danger" onClick={() => { api.setToken(null); onLogout(); }}><Icon name="logout" size={16}/> Sign Out</button>
+                                <button className="user-dropdown-item danger" onClick={() => { api.setToken(null); onLogout(); }}><Icon name="logout" size={16}/> {t('logout')}</button>
                             </div>}
                         </div>
                     </div>
@@ -1499,11 +1883,11 @@
 
                     <aside className={`sidebar ${mobileMenuOpen ? 'mobile-open' : ''}`}>
                         <div className="sidebar-label">Menu</div>
-                        <div className={`sidebar-item ${view==='dashboard'&&!doc?'active':''}`} onClick={() => { setView('dashboard'); setDoc(null); setMobileMenuOpen(false); }}><Icon name="home"/> Dashboard</div>
-                        <div className={`sidebar-item ${view==='documents'?'active':''}`} onClick={() => { setView('documents'); setDoc(null); setMobileMenuOpen(false); }}><Icon name="folder"/> All Documents {activeDocs.length > 0 && <span className="sidebar-badge">{activeDocs.length}</span>}</div>
-                        <div className={`sidebar-item ${view==='templates'?'active':''}`} onClick={() => { setView('templates'); setDoc(null); setMobileMenuOpen(false); }}><Icon name="template"/> Templates {templates.length > 0 && <span className="sidebar-badge">{templates.length}</span>}</div>
-                        <div className="sidebar-label">Actions</div>
-                        <div className="sidebar-item" onClick={() => { setSelectedTemplate(null); setShowCreate(true); setMobileMenuOpen(false); }}><Icon name="plus"/> New Lease</div>
+                        <div className={`sidebar-item ${view==='dashboard'&&!doc?'active':''}`} onClick={() => { setView('dashboard'); setDoc(null); setMobileMenuOpen(false); }}><Icon name="home"/> {t('dashboard')}</div>
+                        <div className={`sidebar-item ${view==='documents'?'active':''}`} onClick={() => { setView('documents'); setDoc(null); setMobileMenuOpen(false); }}><Icon name="folder"/> {t('allDocuments')} {activeDocs.length > 0 && <span className="sidebar-badge">{activeDocs.length}</span>}</div>
+                        <div className={`sidebar-item ${view==='templates'?'active':''}`} onClick={() => { setView('templates'); setDoc(null); setMobileMenuOpen(false); }}><Icon name="template"/> {t('templates')} {templates.length > 0 && <span className="sidebar-badge">{templates.length}</span>}</div>
+                        <div className="sidebar-label">{t('actions')}</div>
+                        <div className="sidebar-item" onClick={() => { setSelectedTemplate(null); setShowCreate(true); setMobileMenuOpen(false); }}><Icon name="plus"/> {t('newDocument')}</div>
                     </aside>
 
                     <main className="main-content">
@@ -2010,7 +2394,7 @@
             return <Dashboard user={user} onLogout={() => setUser(null)}/>;
         }
 
-        ReactDOM.render(<App/>, document.getElementById('root'));
+        ReactDOM.render(<LangProvider><App/></LangProvider>, document.getElementById('root'));
     </script>
 </body>
 </html>
