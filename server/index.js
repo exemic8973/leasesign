@@ -939,12 +939,13 @@ function generatePDFContent(pdf, doc) {
     resetX();
   };
 
-  const checkSpace = (needed = 100) => {
-    if (pdf.y > pdf.page.height - 100 - needed) newPage();
+  const checkSpace = (needed = 50) => {
+    // Only create new page if we're very close to the bottom (within 60 points of footer)
+    if (pdf.y > pdf.page.height - 60 - needed) newPage();
   };
 
   const sectionTitle = (num, title) => {
-    checkSpace(80);
+    checkSpace(30);
     resetX();
     pdf.font('Helvetica-Bold').fontSize(10).fillColor('#000000');
     pdf.text(`${num}. ${title}`, { width: textWidth });
@@ -959,7 +960,7 @@ function generatePDFContent(pdf, doc) {
   };
 
   const subSection = (letter, text) => {
-    checkSpace(40);
+    checkSpace(20);
     resetX();
     pdf.font('Helvetica-Bold').fontSize(9).text(`${letter}. `, { continued: true, width: textWidth });
     pdf.font('Helvetica').fontSize(9).text(text, { width: textWidth - 20 });
@@ -1183,7 +1184,7 @@ function generatePDFContent(pdf, doc) {
   pdf.moveDown(2);
 
   // ===== SIGNATURE PAGE =====
-  checkSpace(300);
+  checkSpace(150);
   resetX();
   pdf.font('Helvetica-Bold').fontSize(14).text('EXECUTION', leftMargin, pdf.y, { width: textWidth, align: 'center' });
   pdf.moveDown(0.5);
