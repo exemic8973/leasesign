@@ -1,5 +1,5 @@
 # LeaseSign Production Dockerfile
-FROM node:18-alpine
+FROM node:25-alpine
 
 # Create app directory
 WORKDIR /app
