@@ -1430,6 +1430,20 @@
                                             {doc.tenantEmail && <p style={{fontSize:'8pt',color:'#666'}}>{doc.tenantEmail}</p>}
                                         </div>
                                     </div>
+                                    {(doc.additionalTenants||[]).map((t,i) => (
+                                        <div key={i} style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'2rem',marginTop:'1.5rem',paddingTop:'1rem',borderTop:'1px dashed #ccc'}}>
+                                            <div>
+                                                <p><strong>CO-TENANT {i+1}:</strong></p>
+                                                {t.signature ? <>
+                                                    <img src={t.signature} className="signature-image" alt={`Co-Tenant ${i+1} Signature`} style={{maxHeight:'60px',marginTop:'0.5rem'}}/>
+                                                    <p style={{fontSize:'8pt',color:'#666',marginTop:'0.25rem'}}>Electronically signed: {new Date(t.signedAt).toLocaleString()}</p>
+                                                    <p style={{fontSize:'8pt',color:'#666'}}>IP: {t.signedIp}</p>
+                                                </> : <div style={{height:'60px',borderBottom:'1px solid #000',marginTop:'0.5rem'}}/>}
+                                                <p style={{marginTop:'0.5rem'}}>{t.name}</p>
+                                                {t.email && <p style={{fontSize:'8pt',color:'#666'}}>{t.email}</p>}
+                                            </div>
+                                        </div>
+                                    ))}
                                 </div>
 
                                 <div style={{marginTop:'2rem',padding:'1rem',background:'#f5f5f5',borderRadius:'4px',fontSize:'8pt',textAlign:'center',color:'#666'}}>
@@ -1450,7 +1464,12 @@
                                         <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Tenant</span><br/><strong>{doc.tenantName}</strong></div>
                                         <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Tenant Email</span><br/>{doc.tenantEmail}</div>
                                         <div><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Tenant Phone</span><br/>{doc.tenantPhone || 'N/A'}</div>
-                                        {doc.additionalOccupants && <div style={{gridColumn:'1/-1'}}><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Additional Occupants</span><br/>{doc.additionalOccupants}</div>}
+                                        {(doc.additionalTenants||[]).map((t,i) => <>
+                                            <div key={`n${i}`}><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Co-Tenant {i+1}</span><br/><strong>{t.name}</strong></div>
+                                            <div key={`e${i}`}><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Co-Tenant {i+1} Email</span><br/>{t.email}</div>
+                                            <div key={`p${i}`}><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Co-Tenant {i+1} Phone</span><br/>{t.phone || 'N/A'}</div>
+                                        </>)}
+                                        {doc.additionalOccupants && <div style={{gridColumn:'1/-1'}}><span style={{color:'var(--gray-500)',fontSize:'0.8rem'}}>Additional Occupants (non-signing)</span><br/>{doc.additionalOccupants}</div>}
                                     </div>
                                 </div>
                                 <div style={{marginBottom:'1.5rem'}}>
