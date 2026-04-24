@@ -1339,7 +1339,7 @@
                                 <div className="section"><p className="section-title">1. PARTIES TO THIS LEASE</p>
                                     <p>This Residential Lease Agreement ("Lease") is entered into between:</p>
                                     <p style={{marginLeft:'1rem'}}><strong>LANDLORD:</strong> <span className="field">{field(doc.landlordName)}</span></p>
-                                    <p style={{marginLeft:'1rem'}}><strong>TENANT(S):</strong> <span className="field">{field(doc.tenantName)}</span>{doc.additionalOccupants && <>, and {doc.additionalOccupants}</>}</p>
+                                    <p style={{marginLeft:'1rem'}}><strong>TENANT(S):</strong> <span className="field">{[doc.tenantName, ...(doc.additionalTenants||[]).map(t=>t.name)].filter(Boolean).join(', ') || '____________'}</span></p>
                                 </div>
 
                                 <div className="section"><p className="section-title">2. LEASED PREMISES</p>
@@ -2243,7 +2243,7 @@
                                 <div className="section"><p className="section-title">1. PARTIES TO THIS LEASE</p>
                                     <p>This Residential Lease Agreement ("Lease") is entered into between:</p>
                                     <p style={{marginLeft:'1rem'}}><strong>LANDLORD:</strong> <span className="field">{field(doc.landlordName)}</span></p>
-                                    <p style={{marginLeft:'1rem'}}><strong>TENANT(S):</strong> <span className="field">{field(doc.tenantName)}</span>{doc.additionalOccupants && <>, and {doc.additionalOccupants}</>}</p>
+                                    <p style={{marginLeft:'1rem'}}><strong>TENANT(S):</strong> <span className="field">{[doc.tenantName, ...(doc.additionalTenants||[]).map(t=>t.name)].filter(Boolean).join(', ') || '____________'}</span></p>
                                 </div>
 
                                 <div className="section"><p className="section-title">2. LEASED PREMISES</p>
