@@ -1185,12 +1185,18 @@
                                     <span style={{width:'24px',height:'24px',background:'var(--primary)',color:'white',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'0.75rem',fontWeight:600}}>1</span>
                                     <span><strong>Landlord</strong> ({doc.landlordEmail})</span>
                                 </div>
-                                <div style={{display:'flex',alignItems:'center',gap:'0.75rem'}}>
+                                <div style={{display:'flex',alignItems:'center',gap:'0.75rem',marginBottom:'0.5rem'}}>
                                     <span style={{width:'24px',height:'24px',background:'var(--gray-300)',color:'white',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'0.75rem',fontWeight:600}}>2</span>
                                     <span><strong>Tenant</strong> ({doc.tenantEmail})</span>
                                 </div>
+                                {(doc.additionalTenants || []).map((t, i) => (
+                                    <div key={i} style={{display:'flex',alignItems:'center',gap:'0.75rem',marginBottom:'0.5rem'}}>
+                                        <span style={{width:'24px',height:'24px',background:'var(--gray-300)',color:'white',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'0.75rem',fontWeight:600}}>{i + 3}</span>
+                                        <span><strong>{t.name || `Co-Tenant ${i + 1}`}</strong> ({t.email})</span>
+                                    </div>
+                                ))}
                             </div>
-                            <div className="alert alert-info"><span className="alert-icon">📧</span><div><strong>Email Notification</strong><br/><span style={{fontSize:'0.875rem'}}>A signing link will be sent to {doc.landlordEmail}</span></div></div>
+                            <div className="alert alert-info"><span className="alert-icon">📧</span><div><strong>Email Notification</strong><br/><span style={{fontSize:'0.875rem'}}>A signing link will be sent to {doc.landlordEmail}. After landlord signs, all tenants will receive their links simultaneously.</span></div></div>
                         </div>
                         <div className="modal-footer">
                             <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
@@ -1556,6 +1562,15 @@
                                             <div className="timeline-meta">{doc.tenantSignedAt ? `Signed ${new Date(doc.tenantSignedAt).toLocaleString()}` : doc.tenantEmail}</div>
                                         </div>
                                     </div>
+                                    {(doc.additionalTenants || []).map((t, i) => (
+                                        <div key={i} className="timeline-item">
+                                            <div className={`timeline-dot ${t.signedAt ? 'success' : ''}`}>{t.signedAt ? '✓' : (i + 3)}</div>
+                                            <div className="timeline-content">
+                                                <div className="timeline-title">{t.name || `Co-Tenant ${i + 1}`}</div>
+                                                <div className="timeline-meta">{t.signedAt ? `Signed ${new Date(t.signedAt).toLocaleString()}` : t.email}</div>
+                                            </div>
+                                        </div>
+                                    ))}
                                 </div>
                             </div>
                         </div>
@@ -2174,9 +2189,17 @@
             if (error) return <div className="auth-container"><div className="auth-card" style={{textAlign:'center'}}><div style={{fontSize:'3rem',marginBottom:'1rem'}}>⚠️</div><h2>Error</h2><p style={{color:'var(--gray-500)'}}>{error}</p><p style={{color:'var(--gray-400)',fontSize:'0.875rem',marginTop:'1rem'}}>If you believe this is an error, please contact the sender.</p></div></div>;
             if (done) return <div className="auth-container"><div className="auth-card" style={{textAlign:'center'}}><div style={{fontSize:'3rem',marginBottom:'1rem'}}>✅</div><h2>Document Signed Successfully!</h2><p style={{color:'var(--gray-500)',marginBottom:'1rem'}}>Thank you for signing. You will receive a copy of the fully executed lease via email once all parties have signed.</p><div style={{background:'var(--gray-50)',padding:'1rem',borderRadius:'8px',fontSize:'0.875rem',color:'var(--gray-600)'}}><strong>What happens next?</strong><br/>The other party will be notified to sign. Once complete, all parties will receive the final executed document.</div></div></div>;
 
-            const { document: doc, signerType } = data;
-            const signerName = signerType === 'landlord' ? doc.landlordName : doc.tenantName;
-            const signerEmail = signerType === 'landlord' ? doc.landlordEmail : doc.tenantEmail;
+            const { document: doc, signerType, tenantIndex } = data;
+            const signerName = signerType === 'landlord'
+                ? doc.landlordName
+                : signerType === 'additional_tenant'
+                    ? (doc.additionalTenants?.[tenantIndex]?.name || 'Co-Tenant')
+                    : doc.tenantName;
+            const signerEmail = signerType === 'landlord'
+                ? doc.landlordEmail
+                : signerType === 'additional_tenant'
+                    ? (doc.additionalTenants?.[tenantIndex]?.email || '')
+                    : doc.tenantEmail;
             const field = v => v || '____________';
 
             return <div style={{background:'var(--gray-100)',minHeight:'100vh'}}>
@@ -2311,7 +2334,7 @@
                         </div>
                         <div className="card-body">
                             <div style={{background:'var(--gray-50)',padding:'1rem',borderRadius:'8px',marginBottom:'1.5rem'}}>
-                                <p style={{fontWeight:600,marginBottom:'0.5rem'}}>You are signing as: {signerType === 'landlord' ? 'LANDLORD' : 'TENANT'}</p>
+                                <p style={{fontWeight:600,marginBottom:'0.5rem'}}>You are signing as: {signerType === 'landlord' ? 'LANDLORD' : signerType === 'additional_tenant' ? 'CO-TENANT' : 'TENANT'}</p>
                                 <p style={{fontSize:'0.875rem',color:'var(--gray-600)'}}>Name: {signerName}<br/>Email: {signerEmail}</p>
                             </div>
 

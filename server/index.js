@@ -660,6 +660,19 @@ app.get('/api/documents/:id', auth, async (req, res) => {
 app.post('/api/documents', auth, async (req, res) => {
   try {
     const { title, ...docData } = req.body;
+    if (Array.isArray(docData.additionalTenants)) {
+      docData.additionalTenants = docData.additionalTenants.map(t => ({
+        name: t.name || '',
+        email: t.email || '',
+        phone: t.phone || '',
+        signToken: uuidv4(),
+        signature: null,
+        signedAt: null,
+        signedIp: null
+      }));
+    } else {
+      docData.additionalTenants = [];
+    }
     const result = await pool.query(
       `INSERT INTO documents (user_id, status, title, data, landlord_sign_token, tenant_sign_token)
        VALUES ($1, 'draft', $2, $3, $4, $5) RETURNING *`,
@@ -688,6 +701,20 @@ app.put('/api/documents/:id', auth, async (req, res) => {
 
   const { title, status, ...docData } = req.body;
   const existingData = docResult.rows[0].data || {};
+  if (Array.isArray(docData.additionalTenants)) {
+    docData.additionalTenants = docData.additionalTenants.map((t, i) => {
+      const existing = existingData.additionalTenants?.[i];
+      return {
+        name: t.name || '',
+        email: t.email || '',
+        phone: t.phone || '',
+        signToken: existing?.signToken || uuidv4(),
+        signature: existing?.signature || null,
+        signedAt: existing?.signedAt || null,
+        signedIp: existing?.signedIp || null
+      };
+    });
+  }
   const mergedData = { ...existingData, ...docData };
 
   const result = await pool.query(
@@ -755,7 +782,11 @@ app.post('/api/documents/:id/send', auth, async (req, res) => {
 // Public signing endpoint - get document
 app.get('/api/sign/:token', async (req, res) => {
   const result = await pool.query(
-    'SELECT * FROM documents WHERE landlord_sign_token = $1 OR tenant_sign_token = $1',
+    `SELECT * FROM documents
+     WHERE landlord_sign_token = $1
+        OR tenant_sign_token = $1
+        OR (jsonb_typeof(data->'additionalTenants') = 'array'
+            AND data->'additionalTenants' @> jsonb_build_array(jsonb_build_object('signToken', $1)))`,
     [req.params.token]
   );
 
@@ -768,23 +799,35 @@ app.get('/api/sign/:token', async (req, res) => {
     return res.status(410).json({ error: 'This signing link has expired. Please contact the sender to request a new link.', expired: true });
   }
 
-  const signerType = doc.landlordSignToken === req.params.token ? 'landlord' : 'tenant';
+  let signerType, tenantIndex = -1;
+  if (doc.landlordSignToken === req.params.token) {
+    signerType = 'landlord';
+  } else if (doc.tenantSignToken === req.params.token) {
+    signerType = 'tenant';
+  } else {
+    tenantIndex = (doc.additionalTenants || []).findIndex(t => t.signToken === req.params.token);
+    signerType = 'additional_tenant';
+  }
 
-  // Check if already signed
-  if (signerType === 'landlord' && doc.landlordSignedAt) {
+  if (signerType === 'landlord' && doc.landlordSignedAt)
     return res.status(400).json({ error: 'Already signed by landlord' });
-  }
-  if (signerType === 'tenant' && doc.tenantSignedAt) {
+  if (signerType === 'tenant' && doc.tenantSignedAt)
     return res.status(400).json({ error: 'Already signed by tenant' });
-  }
+  if (signerType === 'additional_tenant' && doc.additionalTenants[tenantIndex]?.signedAt)
+    return res.status(400).json({ error: 'Already signed' });
 
   // Remove sensitive tokens
   const safeDoc = { ...doc };
   delete safeDoc.landlordSignToken;
   delete safeDoc.tenantSignToken;
   delete safeDoc.userId;
+  if (Array.isArray(safeDoc.additionalTenants)) {
+    safeDoc.additionalTenants = safeDoc.additionalTenants.map(({ signToken, ...t }) => t);
+  }
 
-  res.json({ document: safeDoc, signerType });
+  const response = { document: safeDoc, signerType };
+  if (signerType === 'additional_tenant') response.tenantIndex = tenantIndex;
+  res.json(response);
 });
 
 // Public signing endpoint - submit signature
@@ -794,43 +837,53 @@ app.post('/api/sign/:token', async (req, res) => {
     if (!signature) return res.status(400).json({ error: 'Signature required' });
 
     const result = await pool.query(
-      'SELECT * FROM documents WHERE landlord_sign_token = $1 OR tenant_sign_token = $1',
+      `SELECT * FROM documents
+       WHERE landlord_sign_token = $1
+          OR tenant_sign_token = $1
+          OR (jsonb_typeof(data->'additionalTenants') = 'array'
+              AND data->'additionalTenants' @> jsonb_build_array(jsonb_build_object('signToken', $1)))`,
       [req.params.token]
     );
 
     if (result.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
 
     const doc = docRowToObject(result.rows[0]);
+    const rawData = result.rows[0].data || {};
 
-    // Check if link has expired
     if (doc.linkExpiresAt && new Date(doc.linkExpiresAt) < new Date()) {
       return res.status(410).json({ error: 'This signing link has expired. Please contact the sender to request a new link.', expired: true });
     }
 
-    const signerType = doc.landlordSignToken === req.params.token ? 'landlord' : 'tenant';
+    let signerType, tenantIndex = -1;
+    if (doc.landlordSignToken === req.params.token) {
+      signerType = 'landlord';
+    } else if (doc.tenantSignToken === req.params.token) {
+      signerType = 'tenant';
+    } else {
+      tenantIndex = (doc.additionalTenants || []).findIndex(t => t.signToken === req.params.token);
+      signerType = 'additional_tenant';
+    }
+
     const ip = req.ip || req.connection?.remoteAddress || 'unknown';
     const now = new Date();
-
     let updateResult;
 
     if (signerType === 'landlord') {
-      // Reset expiration for tenant (7 more days)
       const newExpiration = new Date(Date.now() + LINK_EXPIRATION_MS);
-      const newStatus = doc.tenantSignedAt ? 'completed' : 'partial';
 
       updateResult = await pool.query(
         `UPDATE documents SET
           landlord_signature = $1, landlord_signed_at = $2, landlord_signed_ip = $3,
-          link_expires_at = $4, status = $5, updated_at = CURRENT_TIMESTAMP
-         WHERE id = $6 RETURNING *`,
-        [signature, now, ip, newExpiration, newStatus, doc.id]
+          link_expires_at = $4, status = 'partial', updated_at = CURRENT_TIMESTAMP
+         WHERE id = $5 RETURNING *`,
+        [signature, now, ip, newExpiration, doc.id]
       );
 
       await logAudit(doc.id, 'LANDLORD_SIGNED', doc.landlordEmail, req);
-
-      // Send email to tenant
-      const tenantSignUrl = `${APP_URL}/sign/${doc.tenantSignToken}`;
       const updatedDoc = docRowToObject(updateResult.rows[0]);
+
+      // Send email to primary tenant
+      const tenantSignUrl = `${APP_URL}/sign/${doc.tenantSignToken}`;
       await mailer.sendMail({
         from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
         to: doc.tenantEmail,
@@ -838,16 +891,29 @@ app.post('/api/sign/:token', async (req, res) => {
         text: `Please sign the lease agreement: ${tenantSignUrl}`,
         html: generateSignEmail(updatedDoc, 'tenant', tenantSignUrl)
       });
-
-      // Send SMS to tenant if phone available
       if (doc.tenantPhone) {
         await sendSMS(doc.tenantPhone, `LeaseSign: The landlord has signed! Please sign the lease for ${doc.propertyAddress}. Link: ${tenantSignUrl}`);
       }
 
-      // Notify document owner
+      // Send email to each additional tenant
+      for (const t of (doc.additionalTenants || [])) {
+        if (t.email && t.signToken) {
+          const addSignUrl = `${APP_URL}/sign/${t.signToken}`;
+          await mailer.sendMail({
+            from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
+            to: t.email,
+            subject: `[Action Required] Sign Lease for ${doc.propertyAddress}`,
+            text: `Please sign the lease agreement: ${addSignUrl}`,
+            html: generateSignEmail({ ...updatedDoc, tenantName: t.name }, 'tenant', addSignUrl)
+          });
+        }
+      }
+
       await createNotification(doc.userId, 'signed', 'Landlord Signed', `${doc.landlordName} signed the lease for ${doc.propertyAddress}`, doc.id);
-    } else {
-      const newStatus = doc.landlordSignedAt ? 'completed' : 'partial';
+    } else if (signerType === 'tenant') {
+      const allAdditionalSigned = !(doc.additionalTenants?.length) ||
+        doc.additionalTenants.every(t => t.signedAt);
+      const newStatus = (doc.landlordSignedAt && allAdditionalSigned) ? 'completed' : 'partial';
 
       updateResult = await pool.query(
         `UPDATE documents SET
@@ -858,14 +924,28 @@ app.post('/api/sign/:token', async (req, res) => {
       );
 
       await logAudit(doc.id, 'TENANT_SIGNED', doc.tenantEmail, req);
-
-      // Notify document owner
       await createNotification(doc.userId, 'signed', 'Tenant Signed', `${doc.tenantName} signed the lease for ${doc.propertyAddress}`, doc.id);
+    } else {
+      // Additional tenant signing — update their entry in the JSONB data
+      const updatedTenants = doc.additionalTenants.map((t, i) =>
+        i === tenantIndex ? { ...t, signature, signedAt: now.toISOString(), signedIp: ip } : t
+      );
+      const updatedData = { ...rawData, additionalTenants: updatedTenants };
+      const allAdditionalSigned = updatedTenants.every(t => t.signedAt);
+      const newStatus = (doc.landlordSignedAt && doc.tenantSignedAt && allAdditionalSigned) ? 'completed' : 'partial';
+
+      updateResult = await pool.query(
+        `UPDATE documents SET data = $1, status = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3 RETURNING *`,
+        [JSON.stringify(updatedData), newStatus, doc.id]
+      );
+
+      const tenant = doc.additionalTenants[tenantIndex];
+      await logAudit(doc.id, 'ADDITIONAL_TENANT_SIGNED', tenant.email, req);
+      await createNotification(doc.userId, 'signed', 'Co-Tenant Signed', `${tenant.name} signed the lease for ${doc.propertyAddress}`, doc.id);
     }
 
     const updated = docRowToObject(updateResult.rows[0]);
 
-    // If completed, send completion emails and notify
     if (updated.status === 'completed') {
       await sendCompletionEmails(updated);
       await createNotification(doc.userId, 'completed', 'Lease Completed', `The lease for ${doc.propertyAddress} has been fully executed!`, doc.id);
@@ -982,7 +1062,9 @@ function generatePDFContent(pdf, doc) {
 
   // Section 1: PARTIES
   sectionTitle('1', 'PARTIES');
-  paragraph(`The parties to this lease are: the owner of the Property (Landlord): ${field(doc.landlordName)}; and the following tenant(s) (collectively referred to as "Tenant"): ${field(doc.tenantName)}.`);
+  const allTenantNames = [doc.tenantName, ...(doc.additionalTenants || []).map(t => t.name)]
+    .filter(Boolean).join(', ');
+  paragraph(`The parties to this lease are: the owner of the Property (Landlord): ${field(doc.landlordName)}; and the following tenant(s) (collectively referred to as "Tenant"): ${field(allTenantNames)}.`);
   pdf.moveDown();
 
   // Section 2: PROPERTY
@@ -1231,6 +1313,30 @@ function generatePDFContent(pdf, doc) {
   }
   paragraph(`Name: ${field(doc.tenantName)}`);
 
+  // Additional tenant signature blocks
+  for (const [i, t] of (doc.additionalTenants || []).entries()) {
+    pdf.moveDown();
+    resetX();
+    pdf.font('Helvetica-Bold').fontSize(10).text(`CO-TENANT ${i + 1}:`, { width: textWidth });
+    resetX();
+    if (t.signature) {
+      try {
+        const imgData = t.signature.replace(/^data:image\/\w+;base64,/, '');
+        pdf.image(Buffer.from(imgData, 'base64'), leftMargin, pdf.y, { width: 150, height: 45 });
+        pdf.y += 50;
+      } catch (e) {
+        pdf.font('Helvetica-Oblique').fontSize(9).text('[Electronic Signature on file]', { width: textWidth });
+      }
+      resetX();
+      pdf.font('Helvetica').fontSize(8);
+      paragraph(`Signed: ${t.name} on ${new Date(t.signedAt).toLocaleString()} | IP: ${t.signedIp}`);
+    } else {
+      paragraph('________________________________________     ________________');
+      paragraph('Signature                                                              Date');
+    }
+    paragraph(`Name: ${field(t.name)}`);
+  }
+
   // E-Sign Certificate
   pdf.moveDown();
   resetX();
@@ -1391,10 +1497,13 @@ async function sendCompletionEmails(doc) {
     }] : []
   };
 
-  await Promise.all([
-    mailer.sendMail({ ...emailOptions, to: doc.landlordEmail }),
-    mailer.sendMail({ ...emailOptions, to: doc.tenantEmail })
-  ]);
+  const allRecipients = [
+    doc.landlordEmail,
+    doc.tenantEmail,
+    ...(doc.additionalTenants || []).map(t => t.email)
+  ].filter(Boolean);
+
+  await Promise.all(allRecipients.map(to => mailer.sendMail({ ...emailOptions, to })));
 }
 
 // ==================== AUDIT LOG ====================
@@ -1534,30 +1643,42 @@ app.post('/api/documents/:id/resend', auth, async (req, res) => {
       return res.status(400).json({ error: 'Cannot resend completed or voided document' });
     }
 
-    let recipient, signUrl, signerType;
-
     if (!doc.landlordSignedAt) {
-      recipient = doc.landlordEmail;
-      signUrl = `${APP_URL}/sign/${doc.landlordSignToken}`;
-      signerType = 'landlord';
-    } else if (!doc.tenantSignedAt) {
-      recipient = doc.tenantEmail;
-      signUrl = `${APP_URL}/sign/${doc.tenantSignToken}`;
-      signerType = 'tenant';
-    } else {
-      return res.status(400).json({ error: 'All signatures collected' });
+      const signUrl = `${APP_URL}/sign/${doc.landlordSignToken}`;
+      await mailer.sendMail({
+        from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
+        to: doc.landlordEmail,
+        subject: `[Reminder] Please Sign: Lease for ${doc.propertyAddress}`,
+        text: `Reminder: Please sign the lease agreement: ${signUrl}`,
+        html: generateReminderEmail(doc, 'landlord', signUrl)
+      });
+      await logAudit(doc.id, 'SIGNATURE_REMINDER_SENT', req.user.email, req, { to: doc.landlordEmail });
+      return res.json({ success: true, sentTo: doc.landlordEmail });
     }
 
-    await mailer.sendMail({
-      from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
-      to: recipient,
-      subject: `[Reminder] Please Sign: Lease for ${doc.propertyAddress}`,
-      text: `Reminder: Please sign the lease agreement: ${signUrl}`,
-      html: generateReminderEmail(doc, signerType, signUrl)
-    });
+    // Collect all unsigned tenants (primary + additional)
+    const unsigned = [];
+    if (!doc.tenantSignedAt)
+      unsigned.push({ email: doc.tenantEmail, signToken: doc.tenantSignToken, name: doc.tenantName });
+    for (const t of (doc.additionalTenants || [])) {
+      if (!t.signedAt) unsigned.push({ email: t.email, signToken: t.signToken, name: t.name });
+    }
 
-    await logAudit(doc.id, 'SIGNATURE_REMINDER_SENT', req.user.email, req, { to: recipient });
-    res.json({ success: true, sentTo: recipient });
+    if (unsigned.length === 0)
+      return res.status(400).json({ error: 'All signatures collected' });
+
+    for (const r of unsigned) {
+      const signUrl = `${APP_URL}/sign/${r.signToken}`;
+      await mailer.sendMail({
+        from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
+        to: r.email,
+        subject: `[Reminder] Please Sign: Lease for ${doc.propertyAddress}`,
+        text: `Reminder: Please sign the lease agreement: ${signUrl}`,
+        html: generateReminderEmail({ ...doc, tenantName: r.name }, 'tenant', signUrl)
+      });
+      await logAudit(doc.id, 'SIGNATURE_REMINDER_SENT', req.user.email, req, { to: r.email });
+    }
+    res.json({ success: true, sentTo: unsigned.map(r => r.email).join(', ') });
   } catch (e) {
     console.error('Resend error:', e);
     res.status(500).json({ error: 'Failed to resend' });
@@ -1572,7 +1693,18 @@ app.post('/api/documents/:id/duplicate', auth, async (req, res) => {
     }
 
     const original = docRowToObject(docResult.rows[0]);
-    const originalData = docResult.rows[0].data || {};
+    const originalData = { ...(docResult.rows[0].data || {}) };
+    if (Array.isArray(originalData.additionalTenants)) {
+      originalData.additionalTenants = originalData.additionalTenants.map(t => ({
+        name: t.name || '',
+        email: t.email || '',
+        phone: t.phone || '',
+        signToken: uuidv4(),
+        signature: null,
+        signedAt: null,
+        signedIp: null
+      }));
+    }
 
     const result = await pool.query(
       `INSERT INTO documents (user_id, status, title, data, landlord_sign_token, tenant_sign_token)
@@ -1628,7 +1760,21 @@ app.post('/api/templates', auth, async (req, res) => {
       if (docResult.rows.length === 0) {
         return res.status(404).json({ error: 'Document not found' });
       }
-      templateData = docResult.rows[0].data || {};
+      templateData = { ...(docResult.rows[0].data || {}) };
+    }
+    // Clear party-specific info for template
+    templateData.tenantEmail = '';
+    templateData.tenantPhone = '';
+    if (Array.isArray(templateData.additionalTenants)) {
+      templateData.additionalTenants = templateData.additionalTenants.map(t => ({
+        name: t.name || '',
+        email: '',
+        phone: t.phone || '',
+        signToken: undefined,
+        signature: null,
+        signedAt: null,
+        signedIp: null
+      }));
     }
 
     const result = await pool.query(
@@ -1660,6 +1806,17 @@ app.post('/api/templates/:id/use', auth, async (req, res) => {
     const templateData = template.data || {};
     const overrideData = req.body;
     const mergedData = { ...templateData, ...overrideData };
+    // Generate fresh sign tokens for additional tenants
+    const sourceTenants = overrideData.additionalTenants || templateData.additionalTenants || [];
+    mergedData.additionalTenants = sourceTenants.map(t => ({
+      name: t.name || '',
+      email: t.email || '',
+      phone: t.phone || '',
+      signToken: uuidv4(),
+      signature: null,
+      signedAt: null,
+      signedIp: null
+    }));
 
     const result = await pool.query(
       `INSERT INTO documents (user_id, status, title, data, landlord_sign_token, tenant_sign_token)
@@ -1693,27 +1850,38 @@ app.post('/api/documents/bulk-remind', auth, async (req, res) => {
       const doc = docRowToObject(docResult.rows[0]);
       if (doc.status === 'completed' || doc.status === 'voided' || doc.status === 'draft') continue;
 
-      let recipient, signUrl, signerType;
-      if (!doc.landlordSignedAt) {
-        recipient = doc.landlordEmail;
-        signUrl = `${APP_URL}/sign/${doc.landlordSignToken}`;
-        signerType = 'landlord';
-      } else if (!doc.tenantSignedAt) {
-        recipient = doc.tenantEmail;
-        signUrl = `${APP_URL}/sign/${doc.tenantSignToken}`;
-        signerType = 'tenant';
-      } else continue;
-
       try {
-        await mailer.sendMail({
-          from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
-          to: recipient,
-          subject: `[Reminder] Please Sign: Lease for ${doc.propertyAddress}`,
-          text: `Reminder: Please sign the lease agreement: ${signUrl}`,
-          html: generateReminderEmail(doc, signerType, signUrl)
-        });
-        results.push({ id, success: true, sentTo: recipient });
-        await logAudit(doc.id, 'BULK_REMINDER_SENT', req.user.email, req, { to: recipient });
+        if (!doc.landlordSignedAt) {
+          const signUrl = `${APP_URL}/sign/${doc.landlordSignToken}`;
+          await mailer.sendMail({
+            from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
+            to: doc.landlordEmail,
+            subject: `[Reminder] Please Sign: Lease for ${doc.propertyAddress}`,
+            text: `Reminder: Please sign the lease agreement: ${signUrl}`,
+            html: generateReminderEmail(doc, 'landlord', signUrl)
+          });
+          results.push({ id, success: true, sentTo: doc.landlordEmail });
+          await logAudit(doc.id, 'BULK_REMINDER_SENT', req.user.email, req, { to: doc.landlordEmail });
+        } else {
+          const unsigned = [];
+          if (!doc.tenantSignedAt)
+            unsigned.push({ email: doc.tenantEmail, signToken: doc.tenantSignToken, name: doc.tenantName });
+          for (const t of (doc.additionalTenants || [])) {
+            if (!t.signedAt) unsigned.push({ email: t.email, signToken: t.signToken, name: t.name });
+          }
+          for (const r of unsigned) {
+            const signUrl = `${APP_URL}/sign/${r.signToken}`;
+            await mailer.sendMail({
+              from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
+              to: r.email,
+              subject: `[Reminder] Please Sign: Lease for ${doc.propertyAddress}`,
+              text: `Reminder: Please sign the lease agreement: ${signUrl}`,
+              html: generateReminderEmail({ ...doc, tenantName: r.name }, 'tenant', signUrl)
+            });
+            await logAudit(doc.id, 'BULK_REMINDER_SENT', req.user.email, req, { to: r.email });
+          }
+          results.push({ id, success: true, sentTo: unsigned.map(r => r.email).join(', ') });
+        }
       } catch (e) {
         results.push({ id, success: false, error: e.message });
       }
