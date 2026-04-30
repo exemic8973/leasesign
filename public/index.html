@@ -69,6 +69,7 @@
         .status-partial { background: #dbeafe; color: #1e40af; }
         .status-completed { background: var(--success-light); color: #065f46; }
         .status-voided { background: var(--danger-light); color: #991b1b; }
+        .status-declined { background: #fce7f3; color: #9d174d; }
         .status-template { background: #e0e7ff; color: #3730a3; }
         .status-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
         
@@ -414,6 +415,7 @@
                 statusPartial: 'Partially Signed',
                 statusCompleted: 'Completed',
                 statusVoided: 'Voided',
+                statusDeclined: 'Declined',
                 statusTemplate: 'Template',
 
                 // Notifications
@@ -577,6 +579,7 @@
                 statusPartial: '部分已签',
                 statusCompleted: '已完成',
                 statusVoided: '已作废',
+                statusDeclined: '已拒签',
                 statusTemplate: '模板',
 
                 // Notifications
@@ -719,6 +722,7 @@
                 partial: ['status-partial', t('statusPartial')],
                 completed: ['status-completed', t('statusCompleted')],
                 voided: ['status-voided', t('statusVoided')],
+                declined: ['status-declined', t('statusDeclined')],
                 template: ['status-template', t('statusTemplate')]
             };
             const [cls, label] = cfg[status] || cfg.draft;
@@ -2006,6 +2010,7 @@
                                 </div>
 
                                 {view === 'dashboard' && <>
+                                    {(() => { const awaitingMySig = docs.filter(d => (d.status === 'pending' || d.status === 'partial') && !d.landlordSignedAt); return awaitingMySig.length > 0 ? <div style={{background:'#fffbeb',border:'1px solid #fcd34d',borderRadius:'10px',padding:'1rem 1.25rem',marginBottom:'1.5rem',display:'flex',alignItems:'center',gap:'1rem'}}><span style={{fontSize:'1.5rem'}}>✍️</span><div style={{flex:1}}><strong style={{color:'#92400e'}}>Awaiting Your Signature</strong><p style={{margin:'0.25rem 0 0',fontSize:'0.875rem',color:'#78350f'}}>You have {awaitingMySig.length} document{awaitingMySig.length > 1 ? 's' : ''} waiting for your signature as landlord.</p></div><button className="btn btn-primary btn-sm" onClick={() => { setStatusFilter('pending'); setView('documents'); }}>View Now</button></div> : null; })()}
                                     <div className="stats-grid">
                                         <div className="stat-card"><div className="stat-icon blue">📄</div><div className="stat-label">Total</div><div className="stat-value">{stats.total || 0}</div></div>
                                         <div className="stat-card"><div className="stat-icon yellow">⏳</div><div className="stat-label">Awaiting</div><div className="stat-value">{(stats.pending || 0) + (stats.partial || 0)}</div></div>
@@ -2187,6 +2192,10 @@
             const [signing, setSigning] = useState(false);
             const [done, setDone] = useState(false);
             const [agreed, setAgreed] = useState(false);
+            const [showDecline, setShowDecline] = useState(false);
+            const [declineReason, setDeclineReason] = useState('');
+            const [declining, setDeclining] = useState(false);
+            const [declined, setDeclined] = useState(false);
 
             useEffect(() => {
                 fetch(`/api/sign/${token}`).then(r => r.json()).then(d => { if (d.error) throw new Error(d.error); setData(d); }).catch(e => setError(e.message)).finally(() => setLoading(false));
@@ -2204,9 +2213,21 @@
                 finally { setSigning(false); }
             };
 
+            const decline = async () => {
+                setDeclining(true);
+                try {
+                    const res = await fetch(`/api/sign/${token}/decline`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason: declineReason }) });
+                    const d = await res.json();
+                    if (!res.ok) throw new Error(d.error);
+                    setDeclined(true);
+                } catch (e) { setError(e.message); }
+                finally { setDeclining(false); }
+            };
+
             if (loading) return <div className="auth-container"><div className="auth-card" style={{textAlign:'center'}}><div style={{fontSize:'2rem',marginBottom:'1rem'}}>⏳</div><h2>Loading Document...</h2><p style={{color:'var(--gray-500)'}}>Please wait while we retrieve your lease agreement.</p></div></div>;
             if (error) return <div className="auth-container"><div className="auth-card" style={{textAlign:'center'}}><div style={{fontSize:'3rem',marginBottom:'1rem'}}>⚠️</div><h2>Error</h2><p style={{color:'var(--gray-500)'}}>{error}</p><p style={{color:'var(--gray-400)',fontSize:'0.875rem',marginTop:'1rem'}}>If you believe this is an error, please contact the sender.</p></div></div>;
             if (done) return <div className="auth-container"><div className="auth-card" style={{textAlign:'center'}}><div style={{fontSize:'3rem',marginBottom:'1rem'}}>✅</div><h2>Document Signed Successfully!</h2><p style={{color:'var(--gray-500)',marginBottom:'1rem'}}>Thank you for signing. You will receive a copy of the fully executed lease via email once all parties have signed.</p><div style={{background:'var(--gray-50)',padding:'1rem',borderRadius:'8px',fontSize:'0.875rem',color:'var(--gray-600)'}}><strong>What happens next?</strong><br/>The other party will be notified to sign. Once complete, all parties will receive the final executed document.</div></div></div>;
+            if (declined) return <div className="auth-container"><div className="auth-card" style={{textAlign:'center'}}><div style={{fontSize:'3rem',marginBottom:'1rem'}}>❌</div><h2>Lease Declined</h2><p style={{color:'var(--gray-500)',marginBottom:'1rem'}}>You have declined to sign this lease agreement. The sender has been notified.</p>{declineReason && <div style={{background:'var(--gray-50)',padding:'1rem',borderRadius:'8px',fontSize:'0.875rem',color:'var(--gray-600)',textAlign:'left'}}><strong>Your reason:</strong> {declineReason}</div>}</div></div>;
 
             const { document: doc, signerType, tenantIndex } = data;
             const signerName = signerType === 'landlord'
@@ -2373,6 +2394,25 @@
                                 </div>
                             }
                             {signing && <p style={{textAlign:'center',color:'var(--gray-500)',marginTop:'1rem'}}>Submitting your signature...</p>}
+
+                            <div style={{marginTop:'2rem',paddingTop:'1.5rem',borderTop:'1px solid var(--gray-200)'}}>
+                                {!showDecline ? (
+                                    <div style={{textAlign:'center'}}>
+                                        <p style={{color:'var(--gray-500)',fontSize:'0.875rem',marginBottom:'0.75rem'}}>Do you wish to decline this lease?</p>
+                                        <button onClick={() => setShowDecline(true)} style={{background:'none',border:'1px solid var(--danger)',color:'var(--danger)',borderRadius:'6px',padding:'0.5rem 1.25rem',cursor:'pointer',fontSize:'0.875rem'}}>Decline to Sign</button>
+                                    </div>
+                                ) : (
+                                    <div style={{background:'#fff5f5',border:'1px solid #fecaca',borderRadius:'8px',padding:'1.25rem'}}>
+                                        <p style={{fontWeight:600,color:'#991b1b',marginBottom:'0.75rem'}}>Decline to Sign</p>
+                                        <p style={{fontSize:'0.875rem',color:'var(--gray-600)',marginBottom:'0.75rem'}}>Please provide a reason for declining (optional). The sender will be notified.</p>
+                                        <textarea value={declineReason} onChange={e => setDeclineReason(e.target.value)} placeholder="Enter your reason for declining..." rows={3} style={{width:'100%',padding:'0.75rem',border:'1px solid #fecaca',borderRadius:'6px',fontSize:'0.875rem',resize:'vertical',boxSizing:'border-box'}}/>
+                                        <div style={{display:'flex',gap:'0.75rem',marginTop:'0.75rem',justifyContent:'flex-end'}}>
+                                            <button onClick={() => { setShowDecline(false); setDeclineReason(''); }} style={{background:'white',border:'1px solid var(--gray-300)',color:'var(--gray-700)',borderRadius:'6px',padding:'0.5rem 1rem',cursor:'pointer',fontSize:'0.875rem'}}>Cancel</button>
+                                            <button onClick={decline} disabled={declining} style={{background:'var(--danger)',border:'none',color:'white',borderRadius:'6px',padding:'0.5rem 1.25rem',cursor:declining?'not-allowed':'pointer',fontSize:'0.875rem',opacity:declining?0.7:1}}>{declining ? 'Declining...' : 'Confirm Decline'}</button>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
                         </div>
                     </div>
 
@@ -2465,7 +2505,24 @@
             return <Dashboard user={user} onLogout={() => setUser(null)}/>;
         }
 
-        ReactDOM.render(<LangProvider><App/></LangProvider>, document.getElementById('root'));
+        class ErrorBoundary extends React.Component {
+            constructor(props) { super(props); this.state = { hasError: false, error: null }; }
+            static getDerivedStateFromError(error) { return { hasError: true, error }; }
+            componentDidCatch(error, info) { console.error('LeaseSign error:', error, info); }
+            render() {
+                if (this.state.hasError) {
+                    return React.createElement('div', { style: { display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minHeight:'100vh',padding:'2rem',textAlign:'center' } },
+                        React.createElement('div', { style: { fontSize:'3rem',marginBottom:'1rem' } }, '⚠️'),
+                        React.createElement('h2', { style: { marginBottom:'0.5rem' } }, 'Something went wrong'),
+                        React.createElement('p', { style: { color:'#6b7280',marginBottom:'1.5rem' } }, this.state.error?.message || 'An unexpected error occurred.'),
+                        React.createElement('button', { onClick: () => window.location.reload(), style: { background:'var(--primary)',color:'white',border:'none',borderRadius:'8px',padding:'0.75rem 1.5rem',cursor:'pointer',fontSize:'1rem' } }, 'Reload Page')
+                    );
+                }
+                return this.props.children;
+            }
+        }
+
+        ReactDOM.render(<ErrorBoundary><LangProvider><App/></LangProvider></ErrorBoundary>, document.getElementById('root'));
     </script>
 </body>
 </html>

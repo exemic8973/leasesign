@@ -32,6 +32,31 @@ const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'leasesign-secret-key-change-in-production-' + crypto.randomBytes(16).toString('hex');
 const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 
+// Warn if JWT_SECRET is not explicitly set
+if (!process.env.JWT_SECRET) {
+  console.warn('\n⚠️  WARNING: JWT_SECRET environment variable is not set.');
+  console.warn('   All sessions will be invalidated on every server restart.');
+  console.warn('   Set JWT_SECRET in your .env file for production use.\n');
+}
+
+// Simple in-memory rate limiter for login endpoint
+const loginAttempts = new Map();
+const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+const RATE_LIMIT_MAX = 10;
+
+const checkLoginRateLimit = (ip) => {
+  const now = Date.now();
+  const record = loginAttempts.get(ip) || { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS };
+  if (now > record.resetAt) { record.count = 0; record.resetAt = now + RATE_LIMIT_WINDOW_MS; }
+  record.count++;
+  loginAttempts.set(ip, record);
+  return record.count > RATE_LIMIT_MAX;
+};
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, r] of loginAttempts.entries()) { if (now > r.resetAt) loginAttempts.delete(ip); }
+}, 60 * 60 * 1000);
+
 // Data storage paths (for uploads and generated files)
 const UPLOADS_DIR = path.join(__dirname, '../uploads');
 const GENERATED_DIR = path.join(__dirname, '../generated');
@@ -412,6 +437,11 @@ app.post('/api/auth/register', async (req, res) => {
 
 app.post('/api/auth/login', async (req, res) => {
   try {
+    const ip = req.ip || req.connection?.remoteAddress || 'unknown';
+    if (checkLoginRateLimit(ip)) {
+      return res.status(429).json({ error: 'Too many login attempts. Please try again in 15 minutes.' });
+    }
+
     const { email, password } = req.body;
 
     const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
@@ -2066,6 +2096,73 @@ app.post('/api/notifications/mark-all-read', auth, async (req, res) => {
     [req.user.id]
   );
   res.json({ success: true, updated: result.rowCount });
+});
+
+// ==================== DECLINE SIGNING ====================
+
+app.post('/api/sign/:token/decline', async (req, res) => {
+  try {
+    const { reason } = req.body;
+
+    const result = await pool.query(
+      `SELECT * FROM documents
+       WHERE landlord_sign_token = $1
+          OR tenant_sign_token = $1
+          OR (jsonb_typeof(data->'additionalTenants') = 'array'
+              AND data->'additionalTenants' @> jsonb_build_array(jsonb_build_object('signToken', $1)))`,
+      [req.params.token]
+    );
+
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
+
+    const doc = docRowToObject(result.rows[0]);
+
+    if (doc.status === 'completed' || doc.status === 'voided' || doc.status === 'declined') {
+      return res.status(400).json({ error: 'Document cannot be declined in its current state' });
+    }
+
+    if (doc.linkExpiresAt && new Date(doc.linkExpiresAt) < new Date()) {
+      return res.status(410).json({ error: 'This signing link has expired.' });
+    }
+
+    let declinedBy;
+    if (doc.landlordSignToken === req.params.token) {
+      declinedBy = doc.landlordName || 'Landlord';
+    } else if (doc.tenantSignToken === req.params.token) {
+      declinedBy = doc.tenantName || 'Tenant';
+    } else {
+      const idx = (doc.additionalTenants || []).findIndex(t => t.signToken === req.params.token);
+      declinedBy = doc.additionalTenants?.[idx]?.name || 'Co-Tenant';
+    }
+
+    const rawData = result.rows[0].data || {};
+    const updatedData = { ...rawData, declinedBy, declineReason: reason || '', declinedAt: new Date().toISOString() };
+
+    await pool.query(
+      `UPDATE documents SET status = 'declined', data = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+      [JSON.stringify(updatedData), doc.id]
+    );
+
+    await logAudit(doc.id, 'DOCUMENT_DECLINED', declinedBy, req, { reason });
+    await createNotification(doc.userId, 'declined', 'Document Declined',
+      `${declinedBy} declined to sign the lease for ${doc.propertyAddress}`, doc.id);
+
+    if (mailer) {
+      try {
+        await mailer.sendMail({
+          from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
+          to: doc.landlordEmail,
+          subject: `[Alert] Lease Declined: ${doc.propertyAddress}`,
+          html: `<p style="font-family:sans-serif"><strong>${declinedBy}</strong> has declined to sign the lease for <strong>${doc.propertyAddress}</strong>.</p>${reason ? `<p style="font-family:sans-serif">Reason provided: ${reason}</p>` : '<p style="font-family:sans-serif">No reason was provided.</p>'}`
+        });
+      } catch (e) { console.error('Decline notification email failed:', e.message); }
+    }
+
+    res.json({ success: true });
+  } catch (e) {
+    console.error('Decline error:', e);
+    res.status(500).json({ error: 'Failed to decline document' });
+  }
 });
 
 // ==================== CATCH-ALL ROUTE ====================
