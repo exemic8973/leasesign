@@ -2185,11 +2185,16 @@ const sendRenewalNotice = async (doc, daysRemaining, threshold) => {
   const renewalRentAmount = rawData.renewalRentAmount || doc.monthlyRent;
   const renewalTermMonths = rawData.renewalTermMonths || 12;
 
+  const noticeDays = Number(rawData.renewalNoticeDays || 60);
+  const isEarlyWarning = threshold > noticeDays;
   const landlordUrl = `${APP_URL}`;
-  const subject = `Lease Renewal Notice: ${doc.propertyAddress} — ${daysRemaining} days remaining`;
+  const subject = isEarlyWarning
+    ? `Early Renewal Heads-Up: ${doc.propertyAddress} — ${daysRemaining} days remaining`
+    : `Lease Renewal Notice: ${doc.propertyAddress} — ${daysRemaining} days remaining`;
   const bodyHtml = (recipientRole) => `
     <div style="font-family:sans-serif;max-width:600px;margin:0 auto">
-      <h2 style="color:#1e40af">Lease Renewal Notice</h2>
+      <h2 style="color:${isEarlyWarning ? '#92400e' : '#1e40af'}">${isEarlyWarning ? '⚠️ Early Renewal Heads-Up' : 'Lease Renewal Notice'}</h2>
+      ${isEarlyWarning ? `<p style="background:#fffbeb;border:1px solid #fcd34d;padding:0.75rem;border-radius:6px;margin-bottom:1rem">Action required within the next <strong>${daysRemaining - noticeDays} days</strong> — your ${noticeDays}-day notice period begins soon.</p>` : ''}
       <p>Your lease for <strong>${doc.propertyAddress}, ${doc.propertyCity}, TX ${doc.propertyZip}</strong> expires in <strong>${daysRemaining} days</strong>.</p>
       <table style="width:100%;border-collapse:collapse;margin:1rem 0">
         <tr><td style="padding:8px;border:1px solid #e5e7eb;background:#f9fafb"><strong>Current Rent</strong></td><td style="padding:8px;border:1px solid #e5e7eb">$${doc.monthlyRent}/month</td></tr>
@@ -2246,7 +2251,8 @@ const checkRenewals = async () => {
       if (daysRemaining <= 0) continue;
 
       const noticeDays = Number(row.data?.renewalNoticeDays || 60);
-      const thresholds = [noticeDays, Math.round(noticeDays / 2)].filter(t => t > 0);
+      // Three tiers: early warning (before the notice window opens), notice start, and mid-notice reminder
+      const thresholds = [noticeDays + 30, noticeDays, Math.round(noticeDays / 2)].filter(t => t > 0);
       for (const threshold of thresholds) {
         if (daysRemaining <= threshold) {
           await sendRenewalNotice(doc, daysRemaining, threshold);

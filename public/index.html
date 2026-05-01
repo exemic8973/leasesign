@@ -1646,7 +1646,7 @@
                                                 <label style={{display:'block',fontSize:'0.875rem',fontWeight:500,marginBottom:'0.4rem'}}>Notice Period (days before expiry)</label>
                                                 <input type="number" min="7" max="180" value={renewalSettings.renewalNoticeDays} onChange={e => setRenewalSettings(s => ({...s, renewalNoticeDays: e.target.value}))}
                                                     style={{width:'100%',padding:'0.5rem 0.75rem',border:'1px solid var(--gray-300)',borderRadius:'6px',fontSize:'0.875rem',boxSizing:'border-box'}}/>
-                                                <p style={{fontSize:'0.75rem',color:'var(--gray-500)',marginTop:'0.25rem'}}>Notices sent at {renewalSettings.renewalNoticeDays} days and {Math.round(renewalSettings.renewalNoticeDays/2)} days</p>
+                                                <p style={{fontSize:'0.75rem',color:'var(--gray-500)',marginTop:'0.25rem'}}>Early heads-up at {Number(renewalSettings.renewalNoticeDays)+30} days, notice at {renewalSettings.renewalNoticeDays} days, reminder at {Math.round(renewalSettings.renewalNoticeDays/2)} days</p>
                                             </div>
                                             <div>
                                                 <label style={{display:'block',fontSize:'0.875rem',fontWeight:500,marginBottom:'0.4rem'}}>Renewal Term (months)</label>
