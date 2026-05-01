@@ -255,6 +255,7 @@
             get: (url) => api.req(url),
             post: (url, body) => api.req(url, { method: 'POST', body: JSON.stringify(body) }),
             put: (url, body) => api.req(url, { method: 'PUT', body: JSON.stringify(body) }),
+            patch: (url, body) => api.req(url, { method: 'PATCH', body: JSON.stringify(body) }),
             del: (url) => api.req(url, { method: 'DELETE' })
         };
 
@@ -1238,12 +1239,20 @@
         }
 
         // Document Detail
-        function DocDetail({ doc, onBack, onSend, onDownload, onDelete, onRefresh, onDuplicate, onVoid, onResend, onSaveTemplate, onEdit, onRegenerateLink, toast }) {
+        function DocDetail({ doc, onBack, onSend, onDownload, onDelete, onRefresh, onDuplicate, onVoid, onResend, onSaveTemplate, onEdit, onRegenerateLink, onRenew, toast }) {
             const [tab, setTab] = useState('preview');
             const [audit, setAudit] = useState([]);
             const [comments, setComments] = useState([]);
             const [newComment, setNewComment] = useState('');
             const [menuOpen, setMenuOpen] = useState(false);
+            const [renewalSettings, setRenewalSettings] = useState({
+                autoRenew: doc.autoRenew || false,
+                renewalNoticeDays: doc.renewalNoticeDays || 60,
+                renewalRentAmount: doc.renewalRentAmount || doc.monthlyRent || '',
+                renewalTermMonths: doc.renewalTermMonths || 12
+            });
+            const [savingRenewal, setSavingRenewal] = useState(false);
+            const [creatingRenewal, setCreatingRenewal] = useState(false);
 
             useEffect(() => {
                 api.get(`/documents/${doc.id}/audit`).then(setAudit).catch(() => {});
@@ -1330,6 +1339,7 @@
                             <div className="tabs">
                                 <div className={`tab ${tab==='preview'?'active':''}`} onClick={()=>setTab('preview')}>Preview</div>
                                 <div className={`tab ${tab==='details'?'active':''}`} onClick={()=>setTab('details')}>Details</div>
+                                <div className={`tab ${tab==='renewal'?'active':''}`} onClick={()=>setTab('renewal')}>🔄 Renewal{doc.autoRenew ? <span style={{background:'var(--success)',color:'white',borderRadius:'10px',padding:'2px 6px',fontSize:'0.7rem',marginLeft:'4px'}}>ON</span> : ''}</div>
                                 <div className={`tab ${tab==='comments'?'active':''}`} onClick={()=>setTab('comments')}>Comments {comments.length > 0 && <span style={{background:'var(--primary)',color:'white',borderRadius:'10px',padding:'2px 6px',fontSize:'0.7rem',marginLeft:'4px'}}>{comments.length}</span>}</div>
                                 <div className={`tab ${tab==='audit'?'active':''}`} onClick={()=>setTab('audit')}>Audit Log</div>
                             </div>
@@ -1563,6 +1573,133 @@
                                     <div style={{fontSize:'0.875rem',color:'var(--gray-500)'}}>{a.actor} • {new Date(a.timestamp).toLocaleString()} • IP: {a.ip}</div>
                                 </div>)}
                             </div>}
+
+                            {tab === 'renewal' && (() => {
+                                const leaseEnd = doc.leaseEndDate ? new Date(doc.leaseEndDate) : null;
+                                const today = new Date();
+                                const daysRemaining = leaseEnd ? Math.ceil((leaseEnd - today) / (1000 * 60 * 60 * 24)) : null;
+                                const isExpired = daysRemaining !== null && daysRemaining <= 0;
+                                const isExpiringSoon = daysRemaining !== null && daysRemaining > 0 && daysRemaining <= (renewalSettings.renewalNoticeDays || 60);
+                                const notices = doc.renewalNotices || [];
+                                const hasRenewal = !!doc.renewedDocumentId;
+
+                                const saveRenewalSettings = async () => {
+                                    setSavingRenewal(true);
+                                    try {
+                                        const updated = await api.put(`/documents/${doc.id}/renewal`, renewalSettings);
+                                        onRefresh(updated);
+                                        toast('Renewal settings saved');
+                                    } catch (e) { toast(e.message, 'error'); }
+                                    finally { setSavingRenewal(false); }
+                                };
+
+                                const createRenewal = async () => {
+                                    setCreatingRenewal(true);
+                                    try {
+                                        const newDoc = await api.post(`/documents/${doc.id}/renew`, {
+                                            renewalRentAmount: renewalSettings.renewalRentAmount,
+                                            renewalTermMonths: renewalSettings.renewalTermMonths
+                                        });
+                                        onRenew(newDoc);
+                                        toast('Renewal draft created! Redirecting...');
+                                    } catch (e) { toast(e.message, 'error'); }
+                                    finally { setCreatingRenewal(false); }
+                                };
+
+                                return <div>
+                                    {/* Expiry status banner */}
+                                    {leaseEnd && (
+                                        <div style={{padding:'1rem',borderRadius:'8px',marginBottom:'1.5rem',background: isExpired ? '#fef2f2' : isExpiringSoon ? '#fffbeb' : '#f0fdf4', border: `1px solid ${isExpired ? '#fecaca' : isExpiringSoon ? '#fcd34d' : '#bbf7d0'}`}}>
+                                            <div style={{display:'flex',alignItems:'center',gap:'0.75rem'}}>
+                                                <span style={{fontSize:'1.5rem'}}>{isExpired ? '⛔' : isExpiringSoon ? '⚠️' : '✅'}</span>
+                                                <div>
+                                                    <strong style={{color: isExpired ? '#991b1b' : isExpiringSoon ? '#92400e' : '#065f46'}}>
+                                                        {isExpired ? 'Lease Expired' : isExpiringSoon ? `Expiring in ${daysRemaining} days` : `${daysRemaining} days remaining`}
+                                                    </strong>
+                                                    <p style={{margin:'0.25rem 0 0',fontSize:'0.875rem',color:'var(--gray-600)'}}>
+                                                        Lease end date: {leaseEnd.toLocaleDateString()}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            {(isExpired || isExpiringSoon) && !hasRenewal && (
+                                                <button onClick={createRenewal} disabled={creatingRenewal} className="btn btn-primary btn-sm" style={{marginTop:'0.75rem'}}>
+                                                    {creatingRenewal ? 'Creating...' : '🔄 Create Renewal Draft'}
+                                                </button>
+                                            )}
+                                            {hasRenewal && <p style={{margin:'0.5rem 0 0',fontSize:'0.875rem',color:'#065f46',fontWeight:500}}>✓ Renewal document created</p>}
+                                        </div>
+                                    )}
+
+                                    {/* Auto-Renewal Settings */}
+                                    <div style={{marginBottom:'1.5rem'}}>
+                                        <h4 style={{marginBottom:'1rem',fontWeight:600}}>Auto-Renewal Settings</h4>
+                                        <div style={{display:'flex',alignItems:'center',gap:'0.75rem',marginBottom:'1rem',padding:'0.75rem 1rem',background:'var(--gray-50)',borderRadius:'8px'}}>
+                                            <input type="checkbox" id="autoRenewToggle" checked={renewalSettings.autoRenew} onChange={e => setRenewalSettings(s => ({...s, autoRenew: e.target.checked}))} style={{width:'18px',height:'18px',accentColor:'var(--success)',cursor:'pointer'}}/>
+                                            <label htmlFor="autoRenewToggle" style={{cursor:'pointer'}}>
+                                                <strong>Enable Auto-Renewal Notifications</strong>
+                                                <p style={{margin:'0.2rem 0 0',fontSize:'0.8rem',color:'var(--gray-500)'}}>Automatically email landlord and all tenants before the lease expires</p>
+                                            </label>
+                                        </div>
+
+                                        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'1rem',marginBottom:'1rem'}}>
+                                            <div>
+                                                <label style={{display:'block',fontSize:'0.875rem',fontWeight:500,marginBottom:'0.4rem'}}>Notice Period (days before expiry)</label>
+                                                <input type="number" min="7" max="180" value={renewalSettings.renewalNoticeDays} onChange={e => setRenewalSettings(s => ({...s, renewalNoticeDays: e.target.value}))}
+                                                    style={{width:'100%',padding:'0.5rem 0.75rem',border:'1px solid var(--gray-300)',borderRadius:'6px',fontSize:'0.875rem',boxSizing:'border-box'}}/>
+                                                <p style={{fontSize:'0.75rem',color:'var(--gray-500)',marginTop:'0.25rem'}}>Notices sent at {renewalSettings.renewalNoticeDays} days and {Math.round(renewalSettings.renewalNoticeDays/2)} days</p>
+                                            </div>
+                                            <div>
+                                                <label style={{display:'block',fontSize:'0.875rem',fontWeight:500,marginBottom:'0.4rem'}}>Renewal Term (months)</label>
+                                                <input type="number" min="1" max="60" value={renewalSettings.renewalTermMonths} onChange={e => setRenewalSettings(s => ({...s, renewalTermMonths: e.target.value}))}
+                                                    style={{width:'100%',padding:'0.5rem 0.75rem',border:'1px solid var(--gray-300)',borderRadius:'6px',fontSize:'0.875rem',boxSizing:'border-box'}}/>
+                                            </div>
+                                        </div>
+
+                                        <div style={{marginBottom:'1rem'}}>
+                                            <label style={{display:'block',fontSize:'0.875rem',fontWeight:500,marginBottom:'0.4rem'}}>Renewal Rent Amount</label>
+                                            <div style={{position:'relative'}}>
+                                                <span style={{position:'absolute',left:'0.75rem',top:'50%',transform:'translateY(-50%)',color:'var(--gray-500)'}}>$</span>
+                                                <input type="number" min="0" value={renewalSettings.renewalRentAmount} onChange={e => setRenewalSettings(s => ({...s, renewalRentAmount: e.target.value}))}
+                                                    placeholder={doc.monthlyRent || '0'}
+                                                    style={{width:'100%',padding:'0.5rem 0.75rem 0.5rem 1.5rem',border:'1px solid var(--gray-300)',borderRadius:'6px',fontSize:'0.875rem',boxSizing:'border-box'}}/>
+                                            </div>
+                                            {doc.monthlyRent && renewalSettings.renewalRentAmount && Number(renewalSettings.renewalRentAmount) !== Number(doc.monthlyRent) && (
+                                                <p style={{fontSize:'0.75rem',color: Number(renewalSettings.renewalRentAmount) > Number(doc.monthlyRent) ? '#dc2626' : '#059669',marginTop:'0.25rem'}}>
+                                                    {Number(renewalSettings.renewalRentAmount) > Number(doc.monthlyRent)
+                                                        ? `▲ $${(Number(renewalSettings.renewalRentAmount) - Number(doc.monthlyRent)).toFixed(2)} increase from current rent`
+                                                        : `▼ $${(Number(doc.monthlyRent) - Number(renewalSettings.renewalRentAmount)).toFixed(2)} decrease from current rent`}
+                                                </p>
+                                            )}
+                                        </div>
+
+                                        <button onClick={saveRenewalSettings} disabled={savingRenewal} className="btn btn-primary btn-sm">
+                                            {savingRenewal ? 'Saving...' : 'Save Renewal Settings'}
+                                        </button>
+                                    </div>
+
+                                    {/* Notice history */}
+                                    {notices.length > 0 && <div>
+                                        <h4 style={{marginBottom:'0.75rem',fontWeight:600}}>Notices Sent</h4>
+                                        {notices.map((n, i) => (
+                                            <div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'0.75rem',background:'var(--gray-50)',borderRadius:'6px',marginBottom:'0.5rem'}}>
+                                                <span style={{fontSize:'0.875rem'}}>📧 Notice at {n.daysRemaining} days remaining</span>
+                                                <span style={{fontSize:'0.8rem',color:'var(--gray-500)'}}>{new Date(n.sentAt).toLocaleDateString()}</span>
+                                            </div>
+                                        ))}
+                                    </div>}
+
+                                    {/* Manual create renewal */}
+                                    {!hasRenewal && doc.status === 'completed' && !isExpired && !isExpiringSoon && (
+                                        <div style={{marginTop:'1.5rem',paddingTop:'1.5rem',borderTop:'1px solid var(--gray-200)'}}>
+                                            <h4 style={{marginBottom:'0.5rem',fontWeight:600}}>Create Renewal Early</h4>
+                                            <p style={{fontSize:'0.875rem',color:'var(--gray-500)',marginBottom:'0.75rem'}}>Generate a new draft lease with updated dates and rent before the current lease expires.</p>
+                                            <button onClick={createRenewal} disabled={creatingRenewal} className="btn btn-secondary btn-sm">
+                                                {creatingRenewal ? 'Creating...' : '🔄 Create Renewal Draft'}
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>;
+                            })()}
                         </div>
                     </div>
 
@@ -1971,6 +2108,8 @@
                                 onSaveTemplate={() => setShowSaveTemplate(true)}
                                 onEdit={() => setShowEdit(true)}
                                 onRegenerateLink={regenerateLink}
+                                onRefresh={updated => { setDocs(docs.map(x => x.id === updated.id ? updated : x)); setDoc(updated); }}
+                                onRenew={newDoc => { setDocs([newDoc, ...docs]); setDoc(newDoc); setView('detail'); }}
                                 toast={toast}
                             />
                         ) : view === 'templates' ? (

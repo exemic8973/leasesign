@@ -2171,6 +2171,192 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../public/index.html'));
 });
 
+// ==================== RENEWAL BACKGROUND JOB ====================
+
+const sendRenewalNotice = async (doc, daysRemaining, threshold) => {
+  const rawResult = await pool.query('SELECT * FROM documents WHERE id = $1', [doc.id]);
+  if (rawResult.rows.length === 0) return;
+  const rawData = rawResult.rows[0].data || {};
+  const sentNotices = rawData.renewalNotices || [];
+
+  const alreadySent = sentNotices.some(n => n.threshold === threshold);
+  if (alreadySent) return;
+
+  const renewalRentAmount = rawData.renewalRentAmount || doc.monthlyRent;
+  const renewalTermMonths = rawData.renewalTermMonths || 12;
+
+  const landlordUrl = `${APP_URL}`;
+  const subject = `Lease Renewal Notice: ${doc.propertyAddress} — ${daysRemaining} days remaining`;
+  const bodyHtml = (recipientRole) => `
+    <div style="font-family:sans-serif;max-width:600px;margin:0 auto">
+      <h2 style="color:#1e40af">Lease Renewal Notice</h2>
+      <p>Your lease for <strong>${doc.propertyAddress}, ${doc.propertyCity}, TX ${doc.propertyZip}</strong> expires in <strong>${daysRemaining} days</strong>.</p>
+      <table style="width:100%;border-collapse:collapse;margin:1rem 0">
+        <tr><td style="padding:8px;border:1px solid #e5e7eb;background:#f9fafb"><strong>Current Rent</strong></td><td style="padding:8px;border:1px solid #e5e7eb">$${doc.monthlyRent}/month</td></tr>
+        <tr><td style="padding:8px;border:1px solid #e5e7eb;background:#f9fafb"><strong>Proposed Renewal Rent</strong></td><td style="padding:8px;border:1px solid #e5e7eb">$${renewalRentAmount}/month</td></tr>
+        <tr><td style="padding:8px;border:1px solid #e5e7eb;background:#f9fafb"><strong>Renewal Term</strong></td><td style="padding:8px;border:1px solid #e5e7eb">${renewalTermMonths} months</td></tr>
+        <tr><td style="padding:8px;border:1px solid #e5e7eb;background:#f9fafb"><strong>Lease Expires</strong></td><td style="padding:8px;border:1px solid #e5e7eb">${doc.leaseEndDate}</td></tr>
+      </table>
+      ${recipientRole === 'landlord' ? `<p><a href="${landlordUrl}" style="background:#1e40af;color:white;padding:10px 20px;border-radius:6px;text-decoration:none;display:inline-block;margin-top:0.5rem">Manage Renewal in LeaseSign</a></p>` : '<p>Please contact your landlord to discuss renewal terms.</p>'}
+      <hr style="border:none;border-top:1px solid #e5e7eb;margin:1.5rem 0"/>
+      <p style="color:#6b7280;font-size:0.875rem">LeaseSign — Automated Renewal Notice</p>
+    </div>`;
+
+  const allTenantEmails = [doc.tenantEmail, ...(doc.additionalTenants || []).map(t => t.email)].filter(Boolean);
+
+  if (mailer) {
+    try {
+      await mailer.sendMail({ from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>', to: doc.landlordEmail, subject, html: bodyHtml('landlord') });
+      for (const email of allTenantEmails) {
+        await mailer.sendMail({ from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>', to: email, subject, html: bodyHtml('tenant') });
+      }
+    } catch (e) { console.error('[Renewal] Email failed:', e.message); }
+  }
+
+  await createNotification(doc.userId, 'renewal', 'Lease Renewal Notice',
+    `Lease for ${doc.propertyAddress} expires in ${daysRemaining} days. Renewal rent: $${renewalRentAmount}/mo.`, doc.id);
+
+  const updatedNotices = [...sentNotices, { threshold, daysRemaining, sentAt: new Date().toISOString() }];
+  await pool.query(
+    `UPDATE documents SET data = data || $1::jsonb, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+    [JSON.stringify({ renewalNotices: updatedNotices }), doc.id]
+  );
+
+  await logAudit(doc.id, 'RENEWAL_NOTICE_SENT', 'system', null, { daysRemaining, threshold, to: [doc.landlordEmail, ...allTenantEmails] });
+  console.log(`[Renewal] Notice sent for doc ${doc.id} (${daysRemaining} days remaining)`);
+};
+
+const checkRenewals = async () => {
+  console.log('[Renewal] Running scheduled renewal check...');
+  try {
+    const result = await pool.query(`
+      SELECT * FROM documents
+      WHERE status = 'completed'
+        AND (data->>'autoRenew')::boolean = true
+        AND data->>'leaseEndDate' IS NOT NULL
+        AND data->>'renewedDocumentId' IS NULL
+    `);
+
+    const today = new Date();
+    for (const row of result.rows) {
+      const doc = docRowToObject(row);
+      if (!doc.leaseEndDate) continue;
+      const leaseEnd = new Date(doc.leaseEndDate);
+      const daysRemaining = Math.ceil((leaseEnd - today) / (1000 * 60 * 60 * 24));
+      if (daysRemaining <= 0) continue;
+
+      const noticeDays = Number(row.data?.renewalNoticeDays || 60);
+      const thresholds = [noticeDays, Math.round(noticeDays / 2)].filter(t => t > 0);
+      for (const threshold of thresholds) {
+        if (daysRemaining <= threshold) {
+          await sendRenewalNotice(doc, daysRemaining, threshold);
+        }
+      }
+    }
+    console.log(`[Renewal] Check complete. Processed ${result.rows.length} eligible document(s).`);
+  } catch (e) {
+    console.error('[Renewal] Check failed:', e.message);
+  }
+};
+
+// Run 30s after startup, then every 24 hours
+setTimeout(checkRenewals, 30000);
+setInterval(checkRenewals, 24 * 60 * 60 * 1000);
+
+// ==================== RENEWAL API ====================
+
+// Save renewal settings for a document
+app.put('/api/documents/:id/renewal', auth, async (req, res) => {
+  try {
+    const { autoRenew, renewalNoticeDays, renewalRentAmount, renewalTermMonths } = req.body;
+    const docResult = await pool.query('SELECT * FROM documents WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
+    if (docResult.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
+
+    const patch = {
+      autoRenew: !!autoRenew,
+      renewalNoticeDays: Number(renewalNoticeDays) || 60,
+      renewalRentAmount: renewalRentAmount ? Number(renewalRentAmount) : null,
+      renewalTermMonths: Number(renewalTermMonths) || 12
+    };
+
+    const updated = await pool.query(
+      `UPDATE documents SET data = data || $1::jsonb, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *`,
+      [JSON.stringify(patch), req.params.id]
+    );
+
+    await logAudit(req.params.id, 'RENEWAL_SETTINGS_UPDATED', req.user.email, req, patch);
+    res.json(docRowToObject(updated.rows[0]));
+  } catch (e) {
+    console.error('Renewal settings error:', e);
+    res.status(500).json({ error: 'Failed to save renewal settings' });
+  }
+});
+
+// Create a renewal draft document from a completed lease
+app.post('/api/documents/:id/renew', auth, async (req, res) => {
+  try {
+    const { renewalRentAmount, renewalTermMonths } = req.body;
+    const docResult = await pool.query('SELECT * FROM documents WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
+    if (docResult.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
+
+    const original = docRowToObject(docResult.rows[0]);
+    if (original.status !== 'completed') return res.status(400).json({ error: 'Only completed leases can be renewed' });
+
+    const termMonths = Number(renewalTermMonths) || Number(original.renewalTermMonths) || 12;
+    const newRent = renewalRentAmount ? Number(renewalRentAmount) : (original.renewalRentAmount || original.monthlyRent);
+
+    const oldEnd = original.leaseEndDate ? new Date(original.leaseEndDate) : new Date();
+    const newStart = new Date(oldEnd);
+    newStart.setDate(newStart.getDate() + 1);
+    const newEnd = new Date(newStart);
+    newEnd.setMonth(newEnd.getMonth() + termMonths);
+
+    const fmt = d => d.toISOString().split('T')[0];
+
+    const originalData = { ...(docResult.rows[0].data || {}) };
+    // Reset signing state for the new lease
+    delete originalData.landlordSignature;
+    delete originalData.tenantSignature;
+    delete originalData.declinedBy;
+    delete originalData.declineReason;
+    delete originalData.declinedAt;
+    delete originalData.renewedDocumentId;
+    delete originalData.renewalNotices;
+
+    if (Array.isArray(originalData.additionalTenants)) {
+      originalData.additionalTenants = originalData.additionalTenants.map(t => ({
+        name: t.name || '', email: t.email || '', phone: t.phone || '',
+        signToken: uuidv4(), signature: null, signedAt: null, signedIp: null
+      }));
+    }
+
+    originalData.monthlyRent = newRent;
+    originalData.leaseStartDate = fmt(newStart);
+    originalData.leaseEndDate = fmt(newEnd);
+    originalData.renewedFromId = original.id;
+
+    const result = await pool.query(
+      `INSERT INTO documents (user_id, status, title, data, landlord_sign_token, tenant_sign_token)
+       VALUES ($1, 'draft', $2, $3, $4, $5) RETURNING *`,
+      [req.user.id, `Renewal — ${original.propertyAddress || original.title || 'Lease'}`, JSON.stringify(originalData), uuidv4(), uuidv4()]
+    );
+
+    const newDoc = docRowToObject(result.rows[0]);
+
+    // Mark original doc as having a renewal pending
+    await pool.query(
+      `UPDATE documents SET data = data || $1::jsonb, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+      [JSON.stringify({ renewedDocumentId: newDoc.id }), original.id]
+    );
+
+    await logAudit(newDoc.id, 'RENEWAL_CREATED', req.user.email, req, { fromId: original.id, newRent, termMonths });
+    res.json(newDoc);
+  } catch (e) {
+    console.error('Renew error:', e);
+    res.status(500).json({ error: 'Failed to create renewal document' });
+  }
+});
+
 // ==================== START SERVER ====================
 
 app.listen(PORT, () => {
