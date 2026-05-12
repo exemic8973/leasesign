@@ -3,2360 +3,1915 @@
  * Texas Residential Lease E-Signature Platform
  *
  * Features:
- * - User authentication (JWT)
- * - Document management (CRUD)
- * - E-signature workflow
- * - Email notifications
- * - PDF generation with TAR form
- * - Audit logging
- * - PostgreSQL database
+ * - JWT authentication with refresh tokens
+ * - DocuSign integration for lease signing
+ * - Stripe payments with Texas-specific tax handling
+ * - SendGrid email notifications
+ * - AWS S3 document storage
+ * - Redis session management
+ * - Comprehensive audit logging
+ * - Rate limiting and security middleware
+ * - WebSocket support for real-time updates
  */
 
-// Load environment variables from .env file
-require('dotenv').config();
+'use strict';
 
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
+const rateLimit = require('express-rate-limit');
+const compression = require('compression');
+const cookieParser = require('cookie-parser');
+const { createServer } = require('http');
+const { Server } = require('socket.io');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const { body, validationResult, param, query } = require('express-validator');
+const multer = require('multer');
 const path = require('path');
-const fs = require('fs');
 const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const nodemailer = require('nodemailer');
-const PDFDocument = require('pdfkit');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const sgMail = require('@sendgrid/mail');
+const AWS = require('aws-sdk');
+const redis = require('redis');
 const { Pool } = require('pg');
+const docusign = require('docusign-esign');
+const winston = require('winston');
+const { RateLimiterRedis } = require('rate-limiter-flexible');
+const xss = require('xss');
+const sanitizeHtml = require('sanitize-html');
+require('dotenv').config();
+
+// ==================== CONFIGURATION ====================
+
+const PORT = process.env.PORT || 3001;
+const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
+const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || crypto.randomBytes(64).toString('hex');
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '15m';
+const JWT_REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
+const NODE_ENV = process.env.NODE_ENV || 'development';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+
+// Texas tax configuration
+const TEXAS_TAX_RATE = 0.0825; // 8.25% state + local
+const TEXAS_COUNTIES = {
+  harris: { name: 'Harris County', taxRate: 0.0825, city: 'Houston' },
+  dallas: { name: 'Dallas County', taxRate: 0.0825, city: 'Dallas' },
+  tarrant: { name: 'Tarrant County', taxRate: 0.0825, city: 'Fort Worth' },
+  travis: { name: 'Travis County', taxRate: 0.0825, city: 'Austin' },
+  bexar: { name: 'Bexar County', taxRate: 0.0825, city: 'San Antonio' },
+  collin: { name: 'Collin County', taxRate: 0.0825, city: 'Plano' },
+  hidalgo: { name: 'Hidalgo County', taxRate: 0.0825, city: 'McAllen' },
+  denton: { name: 'Denton County', taxRate: 0.0825, city: 'Denton' },
+  fortbend: { name: 'Fort Bend County', taxRate: 0.0825, city: 'Sugar Land' },
+  montgomery: { name: 'Montgomery County', taxRate: 0.0625, city: 'Conroe' },
+};
+
+// ==================== LOGGING ====================
+
+const logger = winston.createLogger({
+  level: process.env.LOG_LEVEL || 'info',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.errors({ stack: true }),
+    winston.format.json()
+  ),
+  defaultMeta: { service: 'leasesign-server' },
+  transports: [
+    new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
+    new winston.transports.File({ filename: 'logs/combined.log' }),
+  ],
+});
+
+if (NODE_ENV !== 'production') {
+  logger.add(new winston.transports.Console({
+    format: winston.format.combine(
+      winston.format.colorize(),
+      winston.format.simple()
+    ),
+  }));
+}
+
+// ==================== DATABASE ====================
+
+const db = new Pool({
+  host: process.env.DB_HOST || 'localhost',
+  port: process.env.DB_PORT || 5432,
+  database: process.env.DB_NAME || 'leasesign',
+  user: process.env.DB_USER || 'postgres',
+  password: process.env.DB_PASSWORD,
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
+  ssl: NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+});
+
+db.on('error', (err) => {
+  logger.error('Unexpected database error', { error: err.message });
+});
+
+// ==================== REDIS ====================
+
+let redisClient;
+let rateLimiter;
+
+async function initRedis() {
+  try {
+    redisClient = redis.createClient({
+      url: process.env.REDIS_URL || 'redis://localhost:6379',
+      socket: {
+        reconnectStrategy: (retries) => Math.min(retries * 100, 3000),
+      },
+    });
+    
+    redisClient.on('error', (err) => logger.error('Redis error', { error: err.message }));
+    redisClient.on('connect', () => logger.info('Redis connected'));
+    
+    await redisClient.connect();
+    
+    rateLimiter = new RateLimiterRedis({
+      storeClient: redisClient,
+      keyPrefix: 'ratelimit',
+      points: 100,
+      duration: 60,
+    });
+    
+    return true;
+  } catch (err) {
+    logger.warn('Redis connection failed, using memory fallback', { error: err.message });
+    return false;
+  }
+}
+
+// ==================== AWS S3 ====================
+
+const s3 = new AWS.S3({
+  region: process.env.AWS_REGION || 'us-east-1',
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+});
+
+const S3_BUCKET = process.env.S3_BUCKET || 'leasesign-documents';
+
+// ==================== SENDGRID ====================
+
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+
+// ==================== EXPRESS APP ====================
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const JWT_SECRET = process.env.JWT_SECRET || 'leasesign-secret-key-change-in-production-' + crypto.randomBytes(16).toString('hex');
-const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
+const httpServer = createServer(app);
 
-// Warn if JWT_SECRET is not explicitly set
-if (!process.env.JWT_SECRET) {
-  console.warn('\n⚠️  WARNING: JWT_SECRET environment variable is not set.');
-  console.warn('   All sessions will be invalidated on every server restart.');
-  console.warn('   Set JWT_SECRET in your .env file for production use.\n');
-}
+// ==================== SOCKET.IO ====================
 
-// Simple in-memory rate limiter for login endpoint
-const loginAttempts = new Map();
-const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
-const RATE_LIMIT_MAX = 10;
-
-const checkLoginRateLimit = (ip) => {
-  const now = Date.now();
-  const record = loginAttempts.get(ip) || { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS };
-  if (now > record.resetAt) { record.count = 0; record.resetAt = now + RATE_LIMIT_WINDOW_MS; }
-  record.count++;
-  loginAttempts.set(ip, record);
-  return record.count > RATE_LIMIT_MAX;
-};
-setInterval(() => {
-  const now = Date.now();
-  for (const [ip, r] of loginAttempts.entries()) { if (now > r.resetAt) loginAttempts.delete(ip); }
-}, 60 * 60 * 1000);
-
-// Data storage paths (for uploads and generated files)
-const UPLOADS_DIR = path.join(__dirname, '../uploads');
-const GENERATED_DIR = path.join(__dirname, '../generated');
-
-// Ensure directories exist
-[UPLOADS_DIR, GENERATED_DIR].forEach(dir => {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+const io = new Server(httpServer, {
+  cors: {
+    origin: FRONTEND_URL,
+    methods: ['GET', 'POST'],
+    credentials: true,
+  },
+  transports: ['websocket', 'polling'],
 });
 
-// PostgreSQL connection
-// SSL mode is controlled via DATABASE_URL (add ?sslmode=require or ?sslmode=no-verify)
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL
-});
+// ==================== MIDDLEWARE ====================
 
-// Initialize database tables
-async function initDatabase() {
-  const client = await pool.connect();
-  try {
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        email VARCHAR(255) UNIQUE NOT NULL,
-        password VARCHAR(255) NOT NULL,
-        name VARCHAR(255) NOT NULL,
-        company VARCHAR(255) DEFAULT '',
-        phone VARCHAR(50) DEFAULT '',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
+// Security headers
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+      fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+      imgSrc: ["'self'", 'data:', 'https:'],
+      scriptSrc: ["'self'"],
+      connectSrc: ["'self'", FRONTEND_URL],
+    },
+  },
+  crossOriginEmbedderPolicy: false,
+}));
 
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS documents (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
-        status VARCHAR(50) DEFAULT 'draft',
-        title VARCHAR(255),
-        data JSONB DEFAULT '{}',
-        landlord_sign_token UUID,
-        tenant_sign_token UUID,
-        landlord_signature TEXT,
-        landlord_signed_at TIMESTAMP,
-        landlord_signed_ip VARCHAR(50),
-        tenant_signature TEXT,
-        tenant_signed_at TIMESTAMP,
-        tenant_signed_ip VARCHAR(50),
-        link_expires_at TIMESTAMP,
-        voided_at TIMESTAMP,
-        void_reason TEXT,
-        is_template BOOLEAN DEFAULT FALSE,
-        template_name VARCHAR(255),
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS audit_logs (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        document_id UUID REFERENCES documents(id) ON DELETE CASCADE,
-        action VARCHAR(100) NOT NULL,
-        actor VARCHAR(255),
-        ip VARCHAR(50),
-        user_agent TEXT,
-        details JSONB,
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS notifications (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
-        type VARCHAR(50),
-        title VARCHAR(255),
-        message TEXT,
-        document_id UUID,
-        read BOOLEAN DEFAULT FALSE,
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS comments (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        document_id UUID REFERENCES documents(id) ON DELETE CASCADE,
-        author_id UUID,
-        author_name VARCHAR(255),
-        author_email VARCHAR(255),
-        signer_type VARCHAR(50),
-        text TEXT NOT NULL,
-        section VARCHAR(255),
-        resolved BOOLEAN DEFAULT FALSE,
-        resolved_at TIMESTAMP,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS password_resets (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
-        token UUID NOT NULL,
-        expires_at TIMESTAMP NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    console.log('Database tables initialized successfully');
-  } catch (err) {
-    console.error('Database initialization error:', err);
-  } finally {
-    client.release();
-  }
-}
-
-// Initialize database on startup
-initDatabase();
-
-// Link expiration time (7 days in milliseconds)
-const LINK_EXPIRATION_MS = 7 * 24 * 60 * 60 * 1000;
-
-// Helper to create notification
-const createNotification = async (userId, type, title, message, documentId = null) => {
-  try {
-    await pool.query(
-      `INSERT INTO notifications (user_id, type, title, message, document_id) VALUES ($1, $2, $3, $4, $5)`,
-      [userId, type, title, message, documentId]
-    );
-  } catch (err) {
-    console.error('Create notification error:', err);
-  }
-};
-
-// Middleware
-app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-app.use(express.static(path.join(__dirname, '../public')));
-
-// Email transporter
-let mailer = null;
-
-const createMailer = async () => {
-  // Check if custom SMTP is configured
-  if (process.env.SMTP_HOST) {
-    const smtpConfig = {
-      host: process.env.SMTP_HOST,
-      port: parseInt(process.env.SMTP_PORT) || 587,
-      secure: process.env.SMTP_SECURE === 'true',
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS
-      }
-    };
-
-    console.log('='.repeat(60));
-    console.log('CUSTOM SMTP CONFIGURED');
-    console.log('='.repeat(60));
-    console.log(`Host: ${smtpConfig.host}`);
-    console.log(`Port: ${smtpConfig.port}`);
-    console.log(`Secure: ${smtpConfig.secure}`);
-    console.log(`User: ${smtpConfig.auth.user}`);
-    console.log('='.repeat(60));
-
-    const transporter = nodemailer.createTransport(smtpConfig);
-
-    // Verify SMTP connection
-    try {
-      await transporter.verify();
-      console.log('SMTP connection verified successfully!\n');
-    } catch (err) {
-      console.error('SMTP connection failed:', err.message);
-      console.log('Emails may not be delivered. Check your SMTP settings.\n');
-    }
-
-    // Wrap sendMail to log sent emails
-    const originalSendMail = transporter.sendMail.bind(transporter);
-    transporter.sendMail = async (opts) => {
-      try {
-        const info = await originalSendMail(opts);
-        console.log('\n' + '='.repeat(60));
-        console.log('EMAIL SENT SUCCESSFULLY');
-        console.log('='.repeat(60));
-        console.log(`To: ${opts.to}`);
-        console.log(`Subject: ${opts.subject}`);
-        console.log(`Message ID: ${info.messageId}`);
-        console.log('='.repeat(60) + '\n');
-        return info;
-      } catch (err) {
-        console.error('\n' + '='.repeat(60));
-        console.error('EMAIL FAILED TO SEND');
-        console.error('='.repeat(60));
-        console.error(`To: ${opts.to}`);
-        console.error(`Error: ${err.message}`);
-        console.error('='.repeat(60) + '\n');
-        throw err;
-      }
-    };
-
-    return transporter;
-  }
-
-  // Development: use Ethereal for email testing
-  console.log('No SMTP configured. Creating Ethereal test email account...');
-  const testAccount = await nodemailer.createTestAccount();
-  console.log('='.repeat(60));
-  console.log('ETHEREAL TEST EMAIL CONFIGURED');
-  console.log('='.repeat(60));
-  console.log(`View sent emails at: https://ethereal.email`);
-  console.log(`Login: ${testAccount.user}`);
-  console.log(`Password: ${testAccount.pass}`);
-  console.log('='.repeat(60));
-  console.log('To use your own SMTP, create a .env file with:');
-  console.log('   SMTP_HOST=smtp.gmail.com');
-  console.log('   SMTP_PORT=587');
-  console.log('   SMTP_SECURE=false');
-  console.log('   SMTP_USER=your-email@gmail.com');
-  console.log('   SMTP_PASS=your-app-password');
-  console.log('='.repeat(60) + '\n');
-
-  const transporter = nodemailer.createTransport({
-    host: 'smtp.ethereal.email',
-    port: 587,
-    secure: false,
-    auth: {
-      user: testAccount.user,
-      pass: testAccount.pass
-    }
-  });
-
-  // Wrap sendMail to log preview URLs
-  const originalSendMail = transporter.sendMail.bind(transporter);
-  transporter.sendMail = async (opts) => {
-    const info = await originalSendMail(opts);
-    console.log('\n' + '='.repeat(60));
-    console.log('EMAIL SENT (Ethereal)');
-    console.log('='.repeat(60));
-    console.log(`To: ${opts.to}`);
-    console.log(`Subject: ${opts.subject}`);
-    console.log(`Preview URL: ${nodemailer.getTestMessageUrl(info)}`);
-    console.log('='.repeat(60) + '\n');
-    return info;
-  };
-
-  return transporter;
-};
-
-// Initialize mailer asynchronously
-(async () => {
-  mailer = await createMailer();
-})();
-
-// SMS Support (Twilio)
-const sendSMS = async (to, message) => {
-  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_PHONE_NUMBER) {
-    console.log('SMS not configured (Twilio credentials missing)');
-    return null;
-  }
-
-  try {
-    const accountSid = process.env.TWILIO_ACCOUNT_SID;
-    const authToken = process.env.TWILIO_AUTH_TOKEN;
-    const fromNumber = process.env.TWILIO_PHONE_NUMBER;
-
-    // Make Twilio API call
-    const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`, {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Basic ' + Buffer.from(`${accountSid}:${authToken}`).toString('base64'),
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
-      body: new URLSearchParams({ To: to, From: fromNumber, Body: message })
-    });
-
-    const data = await response.json();
-    if (data.sid) {
-      console.log(`SMS sent to ${to}: ${data.sid}`);
-      return data;
+// CORS
+app.use(cors({
+  origin: (origin, callback) => {
+    const allowedOrigins = [
+      FRONTEND_URL,
+      'http://localhost:3000',
+      'http://localhost:3001',
+      process.env.ADMIN_URL,
+    ].filter(Boolean);
+    
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
     } else {
-      console.error('SMS failed:', data.message || data);
-      return null;
+      callback(new Error('Not allowed by CORS'));
     }
-  } catch (err) {
-    console.error('SMS error:', err.message);
-    return null;
-  }
-};
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
+}));
 
-// Helper to convert document row to object with camelCase and data merged
-const docRowToObject = (row) => {
-  if (!row) return null;
-  const data = row.data || {};
-  return {
-    id: row.id,
-    userId: row.user_id,
-    status: row.status,
-    title: row.title,
-    landlordSignToken: row.landlord_sign_token,
-    tenantSignToken: row.tenant_sign_token,
-    landlordSignature: row.landlord_signature,
-    landlordSignedAt: row.landlord_signed_at,
-    landlordSignedIp: row.landlord_signed_ip,
-    tenantSignature: row.tenant_signature,
-    tenantSignedAt: row.tenant_signed_at,
-    tenantSignedIp: row.tenant_signed_ip,
-    linkExpiresAt: row.link_expires_at,
-    voidedAt: row.voided_at,
-    voidReason: row.void_reason,
-    isTemplate: row.is_template,
-    templateName: row.template_name,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    ...data
-  };
-};
+// Compression
+app.use(compression());
 
-// Auth middleware
+// Body parsing
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(cookieParser());
+
+// Logging
+app.use(morgan('combined', {
+  stream: { write: (message) => logger.info(message.trim()) },
+}));
+
+// Rate limiting
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 500,
+  message: { error: 'Too many requests, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/api/', globalLimiter);
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many authentication attempts' },
+  skipSuccessfulRequests: true,
+});
+
+const paymentLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  message: { error: 'Too many payment requests' },
+});
+
+// ==================== FILE UPLOAD ====================
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif'];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid file type. Only PDF, JPEG, PNG, and GIF are allowed.'));
+    }
+  },
+});
+
+// ==================== AUTHENTICATION MIDDLEWARE ====================
+
 const auth = async (req, res, next) => {
-  const token = req.headers.authorization?.replace('Bearer ', '');
-  if (!token) return res.status(401).json({ error: 'Authentication required' });
-
   try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+    
+    const token = authHeader.substring(7);
+    
+    // Check token blacklist
+    if (redisClient) {
+      const isBlacklisted = await redisClient.get(`blacklist:${token}`);
+      if (isBlacklisted) {
+        return res.status(401).json({ error: 'Token has been revoked' });
+      }
+    }
+    
     const decoded = jwt.verify(token, JWT_SECRET);
-    const result = await pool.query('SELECT * FROM users WHERE id = $1', [decoded.id]);
+    
+    // Get user from database
+    const result = await db.query(
+      'SELECT id, email, role, is_active, full_name FROM users WHERE id = $1',
+      [decoded.userId]
+    );
+    
+    if (!result.rows[0] || !result.rows[0].is_active) {
+      return res.status(401).json({ error: 'User not found or inactive' });
+    }
+    
     req.user = result.rows[0];
-    if (!req.user) return res.status(401).json({ error: 'User not found' });
+    req.token = token;
     next();
-  } catch (e) {
+  } catch (err) {
+    if (err.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
+    }
     return res.status(401).json({ error: 'Invalid token' });
   }
 };
 
-// Audit logging
-const logAudit = async (documentId, action, actor, req, details = null) => {
+const requireRole = (...roles) => (req, res, next) => {
+  if (!roles.includes(req.user.role)) {
+    return res.status(403).json({ error: 'Insufficient permissions' });
+  }
+  next();
+};
+
+// ==================== UTILITY FUNCTIONS ====================
+
+function sanitizeInput(input) {
+  if (typeof input === 'string') {
+    return sanitizeHtml(xss(input.trim()), {
+      allowedTags: [],
+      allowedAttributes: {},
+    });
+  }
+  return input;
+}
+
+function calculateTax(amount, county = 'harris') {
+  const countyData = TEXAS_COUNTIES[county.toLowerCase()] || TEXAS_COUNTIES.harris;
+  const taxAmount = Math.round(amount * countyData.taxRate * 100) / 100;
+  return {
+    subtotal: amount,
+    taxRate: countyData.taxRate,
+    taxAmount,
+    total: amount + taxAmount,
+    county: countyData.name,
+  };
+}
+
+async function uploadToS3(buffer, filename, contentType) {
+  const key = `documents/${uuidv4()}/${filename}`;
+  const params = {
+    Bucket: S3_BUCKET,
+    Key: key,
+    Body: buffer,
+    ContentType: contentType,
+    ServerSideEncryption: 'AES256',
+    Metadata: {
+      uploadedAt: new Date().toISOString(),
+    },
+  };
+  
+  await s3.upload(params).promise();
+  return key;
+}
+
+async function getSignedUrl(key, expiresIn = 3600) {
+  return s3.getSignedUrlPromise('getObject', {
+    Bucket: S3_BUCKET,
+    Key: key,
+    Expires: expiresIn,
+  });
+}
+
+async function sendEmail(to, subject, html, text) {
   try {
-    await pool.query(
-      `INSERT INTO audit_logs (document_id, action, actor, ip, user_agent, details) VALUES ($1, $2, $3, $4, $5, $6)`,
-      [documentId, action, actor, req.ip || req.connection?.remoteAddress || 'unknown', req.headers['user-agent'], details ? JSON.stringify(details) : null]
+    await sgMail.send({
+      to,
+      from: {
+        email: process.env.FROM_EMAIL || 'noreply@leasesign.com',
+        name: 'LeaseSign',
+      },
+      subject,
+      html,
+      text,
+    });
+    logger.info('Email sent', { to, subject });
+  } catch (err) {
+    logger.error('Email send failed', { error: err.message, to, subject });
+    throw err;
+  }
+}
+
+async function logAuditEvent(userId, action, resourceType, resourceId, details = {}) {
+  try {
+    await db.query(
+      `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details, ip_address, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+      [userId, action, resourceType, resourceId, JSON.stringify(details), details.ip || null]
     );
   } catch (err) {
-    console.error('Audit log error:', err);
+    logger.error('Audit log failed', { error: err.message });
   }
+}
+
+// ==================== DOCUSIGN INTEGRATION ====================
+
+const docusignConfig = {
+  accountId: process.env.DOCUSIGN_ACCOUNT_ID,
+  clientId: process.env.DOCUSIGN_CLIENT_ID,
+  clientSecret: process.env.DOCUSIGN_CLIENT_SECRET,
+  redirectUri: process.env.DOCUSIGN_REDIRECT_URI || `${FRONTEND_URL}/docusign/callback`,
+  baseUrl: process.env.DOCUSIGN_BASE_URL || 'https://demo.docusign.net',
 };
+
+async function getDocuSignApiClient() {
+  const apiClient = new docusign.ApiClient();
+  apiClient.setBasePath(`${docusignConfig.baseUrl}/restapi`);
+  
+  // Use JWT authentication
+  const token = await getDocuSignToken();
+  apiClient.addDefaultHeader('Authorization', `Bearer ${token}`);
+  
+  return apiClient;
+}
+
+async function getDocuSignToken() {
+  // Check cache
+  if (redisClient) {
+    const cached = await redisClient.get('docusign:token');
+    if (cached) return cached;
+  }
+  
+  const apiClient = new docusign.ApiClient();
+  apiClient.setBasePath(`${docusignConfig.baseUrl}/restapi`);
+  apiClient.setOAuthBasePath(docusignConfig.baseUrl.replace('https://', ''));
+  
+  const results = await apiClient.requestJWTUserToken(
+    docusignConfig.clientId,
+    process.env.DOCUSIGN_USER_ID,
+    ['signature', 'impersonation'],
+    Buffer.from(process.env.DOCUSIGN_PRIVATE_KEY || '', 'base64'),
+    3600
+  );
+  
+  const token = results.body.access_token;
+  
+  // Cache token
+  if (redisClient) {
+    await redisClient.setEx('docusign:token', 3500, token);
+  }
+  
+  return token;
+}
+
+async function createLeaseEnvelope(leaseData, signers) {
+  const apiClient = await getDocuSignApiClient();
+  const envelopesApi = new docusign.EnvelopesApi(apiClient);
+  
+  // Create document
+  const document = new docusign.Document();
+  document.documentBase64 = leaseData.documentBase64;
+  document.name = `Lease Agreement - ${leaseData.propertyAddress}`;
+  document.fileExtension = 'pdf';
+  document.documentId = '1';
+  
+  // Create envelope definition
+  const envelopeDefinition = new docusign.EnvelopeDefinition();
+  envelopeDefinition.emailSubject = `Please sign your lease for ${leaseData.propertyAddress}`;
+  envelopeDefinition.documents = [document];
+  envelopeDefinition.recipients = {
+    signers: signers.map((signer, index) => {
+      const s = new docusign.Signer();
+      s.email = signer.email;
+      s.name = signer.name;
+      s.recipientId = String(index + 1);
+      s.routingOrder = String(index + 1);
+      s.tabs = {
+        signHereTabs: [{
+          anchorString: `[SIGNATURE_${index + 1}]`,
+          anchorUnits: 'pixels',
+          anchorXOffset: '0',
+          anchorYOffset: '0',
+        }],
+        dateSignedTabs: [{
+          anchorString: `[DATE_${index + 1}]`,
+          anchorUnits: 'pixels',
+        }],
+      };
+      return s;
+    }),
+  };
+  envelopeDefinition.status = 'sent';
+  
+  const results = await envelopesApi.createEnvelope(
+    docusignConfig.accountId,
+    { envelopeDefinition }
+  );
+  
+  return results;
+}
+
+// ==================== HEALTH CHECK ====================
+
+app.get('/health', async (req, res) => {
+  const health = {
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    version: process.env.npm_package_version || '1.0.0',
+    environment: NODE_ENV,
+    services: {},
+  };
+  
+  // Check database
+  try {
+    await db.query('SELECT 1');
+    health.services.database = 'connected';
+  } catch (err) {
+    health.services.database = 'error';
+    health.status = 'degraded';
+  }
+  
+  // Check Redis
+  if (redisClient) {
+    try {
+      await redisClient.ping();
+      health.services.redis = 'connected';
+    } catch (err) {
+      health.services.redis = 'error';
+      health.status = 'degraded';
+    }
+  } else {
+    health.services.redis = 'not configured';
+  }
+  
+  // Check S3
+  try {
+    await s3.headBucket({ Bucket: S3_BUCKET }).promise();
+    health.services.s3 = 'connected';
+  } catch (err) {
+    health.services.s3 = 'error';
+    health.status = 'degraded';
+  }
+  
+  res.status(health.status === 'ok' ? 200 : 207).json(health);
+});
 
 // ==================== AUTH ROUTES ====================
 
-app.post('/api/auth/register', async (req, res) => {
+// Register
+app.post('/api/auth/register', authLimiter, [
+  body('email').isEmail().normalizeEmail(),
+  body('password').isLength({ min: 8 }).matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])/),
+  body('fullName').isLength({ min: 2, max: 100 }).trim(),
+  body('role').optional().isIn(['landlord', 'tenant', 'agent']),
+], async (req, res) => {
   try {
-    const { email, password, name, company, phone } = req.body;
-
-    if (!email || !password || !name) {
-      return res.status(400).json({ error: 'Email, password, and name are required' });
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
     }
-
-    const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
-    if (existing.rows.length > 0) {
-      return res.status(400).json({ error: 'Email already registered' });
+    
+    const { email, password, fullName, role = 'tenant', phone, company } = req.body;
+    
+    // Check if email exists
+    const existing = await db.query('SELECT id FROM users WHERE email = $1', [email]);
+    if (existing.rows[0]) {
+      return res.status(409).json({ error: 'Email already registered' });
     }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const result = await pool.query(
-      `INSERT INTO users (email, password, name, company, phone) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [email, hashedPassword, name, company || '', phone || '']
+    
+    // Hash password
+    const passwordHash = await bcrypt.hash(password, 12);
+    
+    // Generate verification token
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    
+    // Create user
+    const result = await db.query(
+      `INSERT INTO users (email, password_hash, full_name, role, phone, company, verification_token, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+       RETURNING id, email, full_name, role`,
+      [email, passwordHash, sanitizeInput(fullName), role, phone, company, verificationToken]
     );
-
+    
     const user = result.rows[0];
-    const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '7d' });
-    const { password: _, ...safeUser } = user;
-
-    res.json({ token, user: safeUser });
-  } catch (e) {
-    console.error('Register error:', e);
+    
+    // Send verification email
+    const verifyUrl = `${FRONTEND_URL}/verify-email?token=${verificationToken}`;
+    await sendEmail(
+      email,
+      'Verify your LeaseSign account',
+      `<h2>Welcome to LeaseSign!</h2><p>Click <a href="${verifyUrl}">here</a> to verify your email.</p>`,
+      `Welcome to LeaseSign! Verify your email: ${verifyUrl}`
+    );
+    
+    await logAuditEvent(user.id, 'REGISTER', 'user', user.id, { ip: req.ip });
+    
+    res.status(201).json({
+      message: 'Registration successful. Please check your email to verify your account.',
+      userId: user.id,
+    });
+  } catch (err) {
+    logger.error('Registration error', { error: err.message });
     res.status(500).json({ error: 'Registration failed' });
   }
 });
 
-app.post('/api/auth/login', async (req, res) => {
+// Login
+app.post('/api/auth/login', authLimiter, [
+  body('email').isEmail().normalizeEmail(),
+  body('password').notEmpty(),
+], async (req, res) => {
   try {
-    const ip = req.ip || req.connection?.remoteAddress || 'unknown';
-    if (checkLoginRateLimit(ip)) {
-      return res.status(429).json({ error: 'Too many login attempts. Please try again in 15 minutes.' });
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
     }
-
+    
     const { email, password } = req.body;
-
-    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    
+    const result = await db.query(
+      'SELECT * FROM users WHERE email = $1',
+      [email]
+    );
+    
     const user = result.rows[0];
-    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
-
-    const valid = await bcrypt.compare(password, user.password);
-    if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
-
-    const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '7d' });
-    const { password: _, ...safeUser } = user;
-
-    res.json({ token, user: safeUser });
-  } catch (e) {
-    console.error('Login error:', e);
+    
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    
+    if (!user.is_verified) {
+      return res.status(401).json({ error: 'Please verify your email first', code: 'EMAIL_NOT_VERIFIED' });
+    }
+    
+    if (!user.is_active) {
+      return res.status(401).json({ error: 'Account has been deactivated' });
+    }
+    
+    const isValidPassword = await bcrypt.compare(password, user.password_hash);
+    if (!isValidPassword) {
+      // Increment failed attempts
+      await db.query(
+        'UPDATE users SET failed_login_attempts = failed_login_attempts + 1 WHERE id = $1',
+        [user.id]
+      );
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    
+    // Reset failed attempts
+    await db.query(
+      'UPDATE users SET failed_login_attempts = 0, last_login = NOW() WHERE id = $1',
+      [user.id]
+    );
+    
+    // Generate tokens
+    const accessToken = jwt.sign(
+      { userId: user.id, email: user.email, role: user.role },
+      JWT_SECRET,
+      { expiresIn: JWT_EXPIRES_IN }
+    );
+    
+    const refreshToken = jwt.sign(
+      { userId: user.id, tokenVersion: user.token_version || 0 },
+      JWT_REFRESH_SECRET,
+      { expiresIn: JWT_REFRESH_EXPIRES_IN }
+    );
+    
+    // Store refresh token in Redis
+    if (redisClient) {
+      await redisClient.setEx(
+        `refresh:${user.id}`,
+        7 * 24 * 60 * 60,
+        refreshToken
+      );
+    }
+    
+    // Set httpOnly cookie for refresh token
+    res.cookie('refreshToken', refreshToken, {
+      httpOnly: true,
+      secure: NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+    
+    await logAuditEvent(user.id, 'LOGIN', 'user', user.id, { ip: req.ip });
+    
+    res.json({
+      accessToken,
+      user: {
+        id: user.id,
+        email: user.email,
+        fullName: user.full_name,
+        role: user.role,
+        company: user.company,
+      },
+    });
+  } catch (err) {
+    logger.error('Login error', { error: err.message });
     res.status(500).json({ error: 'Login failed' });
   }
 });
 
-app.get('/api/auth/me', auth, (req, res) => {
-  const { password: _, ...safeUser } = req.user;
-  res.json(safeUser);
+// Refresh token
+app.post('/api/auth/refresh', async (req, res) => {
+  try {
+    const refreshToken = req.cookies.refreshToken || req.body.refreshToken;
+    
+    if (!refreshToken) {
+      return res.status(401).json({ error: 'No refresh token' });
+    }
+    
+    const decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET);
+    
+    // Verify against Redis
+    if (redisClient) {
+      const stored = await redisClient.get(`refresh:${decoded.userId}`);
+      if (stored !== refreshToken) {
+        return res.status(401).json({ error: 'Invalid refresh token' });
+      }
+    }
+    
+    const result = await db.query(
+      'SELECT id, email, role, is_active FROM users WHERE id = $1',
+      [decoded.userId]
+    );
+    
+    const user = result.rows[0];
+    if (!user || !user.is_active) {
+      return res.status(401).json({ error: 'User not found' });
+    }
+    
+    const accessToken = jwt.sign(
+      { userId: user.id, email: user.email, role: user.role },
+      JWT_SECRET,
+      { expiresIn: JWT_EXPIRES_IN }
+    );
+    
+    res.json({ accessToken });
+  } catch (err) {
+    res.status(401).json({ error: 'Invalid refresh token' });
+  }
 });
 
-// ==================== PASSWORD RESET ====================
+// Logout
+app.post('/api/auth/logout', auth, async (req, res) => {
+  try {
+    // Blacklist current token
+    if (redisClient) {
+      const decoded = jwt.decode(req.token);
+      const ttl = decoded.exp - Math.floor(Date.now() / 1000);
+      if (ttl > 0) {
+        await redisClient.setEx(`blacklist:${req.token}`, ttl, '1');
+      }
+      
+      // Remove refresh token
+      await redisClient.del(`refresh:${req.user.id}`);
+    }
+    
+    res.clearCookie('refreshToken');
+    await logAuditEvent(req.user.id, 'LOGOUT', 'user', req.user.id, { ip: req.ip });
+    
+    res.json({ message: 'Logged out successfully' });
+  } catch (err) {
+    res.status(500).json({ error: 'Logout failed' });
+  }
+});
 
-app.post('/api/auth/forgot-password', async (req, res) => {
+// Verify email
+app.get('/api/auth/verify-email', [
+  query('token').notEmpty(),
+], async (req, res) => {
+  try {
+    const { token } = req.query;
+    
+    const result = await db.query(
+      'UPDATE users SET is_verified = true, verification_token = null WHERE verification_token = $1 RETURNING id',
+      [token]
+    );
+    
+    if (!result.rows[0]) {
+      return res.status(400).json({ error: 'Invalid or expired verification token' });
+    }
+    
+    res.json({ message: 'Email verified successfully' });
+  } catch (err) {
+    res.status(500).json({ error: 'Verification failed' });
+  }
+});
+
+// Request password reset
+app.post('/api/auth/forgot-password', authLimiter, [
+  body('email').isEmail().normalizeEmail(),
+], async (req, res) => {
   try {
     const { email } = req.body;
-    if (!email) return res.status(400).json({ error: 'Email required' });
-
-    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-    const user = result.rows[0];
+    
+    const result = await db.query('SELECT id FROM users WHERE email = $1', [email]);
+    
     // Always return success to prevent email enumeration
-    if (!user) {
-      return res.json({ success: true, message: 'If an account exists, a reset link has been sent.' });
+    if (!result.rows[0]) {
+      return res.json({ message: 'If that email exists, a reset link has been sent' });
     }
-
-    // Generate reset token (expires in 1 hour)
-    const resetToken = uuidv4();
-    const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
-
-    // Delete any existing reset tokens for this user
-    await pool.query('DELETE FROM password_resets WHERE user_id = $1', [user.id]);
-
-    // Create new reset token
-    await pool.query(
-      'INSERT INTO password_resets (user_id, token, expires_at) VALUES ($1, $2, $3)',
-      [user.id, resetToken, expiresAt]
+    
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    const resetExpiry = new Date(Date.now() + 3600000); // 1 hour
+    
+    await db.query(
+      'UPDATE users SET password_reset_token = $1, password_reset_expiry = $2 WHERE id = $3',
+      [resetToken, resetExpiry, result.rows[0].id]
     );
-
-    // Send reset email
-    const resetUrl = `${APP_URL}/reset-password/${resetToken}`;
-    await mailer.sendMail({
-      from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
-      to: email,
-      subject: 'Reset Your LeaseSign Password',
-      html: `
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"></head>
-<body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f3f4f6;">
-  <table width="100%" style="max-width:600px;margin:0 auto;padding:20px;">
-    <tr>
-      <td style="background:linear-gradient(135deg,#4f46e5 0%,#818cf8 100%);padding:40px 30px;text-align:center;border-radius:12px 12px 0 0;">
-        <h1 style="color:white;margin:0;font-size:28px;">Password Reset</h1>
-      </td>
-    </tr>
-    <tr>
-      <td style="background:white;padding:40px 30px;border:1px solid #e5e7eb;border-top:none;">
-        <h2 style="color:#111827;margin:0 0 20px;">Hello ${user.name},</h2>
-        <p style="color:#4b5563;line-height:1.6;">We received a request to reset your password. Click the button below to create a new password:</p>
-        <table width="100%"><tr><td style="text-align:center;padding:20px 0;">
-          <a href="${resetUrl}" style="display:inline-block;background:#4f46e5;color:white;padding:16px 40px;text-decoration:none;border-radius:8px;font-weight:600;">Reset Password</a>
-        </td></tr></table>
-        <p style="color:#9ca3af;font-size:13px;border-top:1px solid #e5e7eb;padding-top:20px;margin-top:20px;">
-          This link expires in 1 hour. If you didn't request this reset, you can safely ignore this email.
-        </p>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>`
-    });
-
-    console.log(`Password reset email sent to ${email}`);
-    res.json({ success: true, message: 'If an account exists, a reset link has been sent.' });
-  } catch (e) {
-    console.error('Forgot password error:', e);
-    res.status(500).json({ error: 'Failed to send reset email' });
+    
+    const resetUrl = `${FRONTEND_URL}/reset-password?token=${resetToken}`;
+    await sendEmail(
+      email,
+      'Reset your LeaseSign password',
+      `<p>Click <a href="${resetUrl}">here</a> to reset your password. This link expires in 1 hour.</p>`,
+      `Reset your password: ${resetUrl}`
+    );
+    
+    res.json({ message: 'If that email exists, a reset link has been sent' });
+  } catch (err) {
+    logger.error('Password reset request error', { error: err.message });
+    res.status(500).json({ error: 'Failed to process request' });
   }
 });
 
-app.get('/api/auth/reset-password/:token', async (req, res) => {
-  const result = await pool.query('SELECT * FROM password_resets WHERE token = $1', [req.params.token]);
-  const reset = result.rows[0];
-  if (!reset) return res.status(404).json({ error: 'Invalid or expired reset link' });
-  if (new Date(reset.expires_at) < new Date()) {
-    await pool.query('DELETE FROM password_resets WHERE id = $1', [reset.id]);
-    return res.status(410).json({ error: 'Reset link has expired' });
-  }
-  res.json({ valid: true });
-});
-
-app.post('/api/auth/reset-password/:token', async (req, res) => {
+// Reset password
+app.post('/api/auth/reset-password', authLimiter, [
+  body('token').notEmpty(),
+  body('password').isLength({ min: 8 }).matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])/),
+], async (req, res) => {
   try {
-    const { password } = req.body;
-    if (!password || password.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    const { token, password } = req.body;
+    
+    const result = await db.query(
+      'SELECT id FROM users WHERE password_reset_token = $1 AND password_reset_expiry > NOW()',
+      [token]
+    );
+    
+    if (!result.rows[0]) {
+      return res.status(400).json({ error: 'Invalid or expired reset token' });
     }
-
-    const result = await pool.query('SELECT * FROM password_resets WHERE token = $1', [req.params.token]);
-    const reset = result.rows[0];
-    if (!reset) return res.status(404).json({ error: 'Invalid or expired reset link' });
-    if (new Date(reset.expires_at) < new Date()) {
-      await pool.query('DELETE FROM password_resets WHERE id = $1', [reset.id]);
-      return res.status(410).json({ error: 'Reset link has expired' });
-    }
-
-    // Update password
-    const hashedPassword = await bcrypt.hash(password, 10);
-    await pool.query('UPDATE users SET password = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [hashedPassword, reset.user_id]);
-
-    // Delete reset token
-    await pool.query('DELETE FROM password_resets WHERE id = $1', [reset.id]);
-
-    res.json({ success: true, message: 'Password reset successfully' });
-  } catch (e) {
-    console.error('Reset password error:', e);
+    
+    const passwordHash = await bcrypt.hash(password, 12);
+    
+    await db.query(
+      'UPDATE users SET password_hash = $1, password_reset_token = null, password_reset_expiry = null, token_version = token_version + 1 WHERE id = $2',
+      [passwordHash, result.rows[0].id]
+    );
+    
+    res.json({ message: 'Password reset successfully' });
+  } catch (err) {
     res.status(500).json({ error: 'Failed to reset password' });
   }
 });
 
-// ==================== DOCUMENT COMMENTS ====================
+// ==================== USER ROUTES ====================
 
-app.get('/api/documents/:id/comments', auth, async (req, res) => {
-  const docResult = await pool.query('SELECT * FROM documents WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
-  if (docResult.rows.length === 0) {
-    return res.status(404).json({ error: 'Document not found' });
+// Get current user
+app.get('/api/users/me', auth, async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT id, email, full_name, role, phone, company, is_verified, created_at, last_login,
+              stripe_customer_id IS NOT NULL as has_payment_method
+       FROM users WHERE id = $1`,
+      [req.user.id]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to get user' });
   }
-
-  const result = await pool.query(
-    'SELECT * FROM comments WHERE document_id = $1 ORDER BY created_at ASC',
-    [req.params.id]
-  );
-  res.json(result.rows);
 });
 
-app.post('/api/documents/:id/comments', auth, async (req, res) => {
-  const docResult = await pool.query('SELECT * FROM documents WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
-  if (docResult.rows.length === 0) {
-    return res.status(404).json({ error: 'Document not found' });
+// Update profile
+app.put('/api/users/me', auth, [
+  body('fullName').optional().isLength({ min: 2, max: 100 }).trim(),
+  body('phone').optional().isMobilePhone(),
+  body('company').optional().isLength({ max: 200 }).trim(),
+], async (req, res) => {
+  try {
+    const { fullName, phone, company } = req.body;
+    
+    await db.query(
+      'UPDATE users SET full_name = COALESCE($1, full_name), phone = COALESCE($2, phone), company = COALESCE($3, company), updated_at = NOW() WHERE id = $4',
+      [sanitizeInput(fullName), phone, sanitizeInput(company), req.user.id]
+    );
+    
+    res.json({ message: 'Profile updated' });
+  } catch (err) {
+    res.status(500).json({ error: 'Update failed' });
   }
-
-  const { text, section } = req.body;
-  if (!text) return res.status(400).json({ error: 'Comment text required' });
-
-  const result = await pool.query(
-    `INSERT INTO comments (document_id, author_id, author_name, author_email, text, section)
-     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-    [req.params.id, req.user.id, req.user.name, req.user.email, text, section || null]
-  );
-
-  res.json(result.rows[0]);
 });
 
-app.post('/api/sign/:token/comments', async (req, res) => {
-  const result = await pool.query(
-    'SELECT * FROM documents WHERE landlord_sign_token = $1 OR tenant_sign_token = $1',
-    [req.params.token]
-  );
-  const doc = docRowToObject(result.rows[0]);
-
-  if (!doc) return res.status(404).json({ error: 'Document not found' });
-
-  const signerType = doc.landlordSignToken === req.params.token ? 'landlord' : 'tenant';
-  const signerName = signerType === 'landlord' ? doc.landlordName : doc.tenantName;
-  const signerEmail = signerType === 'landlord' ? doc.landlordEmail : doc.tenantEmail;
-
-  const { text, section } = req.body;
-  if (!text) return res.status(400).json({ error: 'Comment text required' });
-
-  const commentResult = await pool.query(
-    `INSERT INTO comments (document_id, author_name, author_email, signer_type, text, section)
-     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-    [doc.id, signerName, signerEmail, signerType, text, section || null]
-  );
-
-  // Notify document owner
-  await createNotification(doc.userId, 'comment', 'New Comment', `${signerName} commented on the lease for ${doc.propertyAddress}`, doc.id);
-
-  res.json(commentResult.rows[0]);
+// Change password
+app.put('/api/users/me/password', auth, [
+  body('currentPassword').notEmpty(),
+  body('newPassword').isLength({ min: 8 }).matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])/),
+], async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    
+    const result = await db.query('SELECT password_hash FROM users WHERE id = $1', [req.user.id]);
+    
+    const isValid = await bcrypt.compare(currentPassword, result.rows[0].password_hash);
+    if (!isValid) {
+      return res.status(400).json({ error: 'Current password is incorrect' });
+    }
+    
+    const newHash = await bcrypt.hash(newPassword, 12);
+    await db.query(
+      'UPDATE users SET password_hash = $1, token_version = token_version + 1 WHERE id = $2',
+      [newHash, req.user.id]
+    );
+    
+    res.json({ message: 'Password changed successfully' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to change password' });
+  }
 });
 
-app.get('/api/sign/:token/comments', async (req, res) => {
-  const result = await pool.query(
-    'SELECT * FROM documents WHERE landlord_sign_token = $1 OR tenant_sign_token = $1',
-    [req.params.token]
-  );
-
-  if (result.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
-
-  const comments = await pool.query(
-    'SELECT * FROM comments WHERE document_id = $1 ORDER BY created_at ASC',
-    [result.rows[0].id]
-  );
-  res.json(comments.rows);
+// Get all users (admin)
+app.get('/api/users', auth, requireRole('admin'), async (req, res) => {
+  try {
+    const { page = 1, limit = 20, role, search } = req.query;
+    const offset = (page - 1) * limit;
+    
+    let queryStr = 'SELECT id, email, full_name, role, is_active, created_at FROM users WHERE 1=1';
+    const params = [];
+    
+    if (role) {
+      params.push(role);
+      queryStr += ` AND role = $${params.length}`;
+    }
+    
+    if (search) {
+      params.push(`%${search}%`);
+      queryStr += ` AND (email ILIKE $${params.length} OR full_name ILIKE $${params.length})`;
+    }
+    
+    queryStr += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(limit, offset);
+    
+    const result = await db.query(queryStr, params);
+    const count = await db.query('SELECT COUNT(*) FROM users');
+    
+    res.json({
+      users: result.rows,
+      total: parseInt(count.rows[0].count),
+      page: parseInt(page),
+      limit: parseInt(limit),
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to get users' });
+  }
 });
 
-app.patch('/api/documents/:docId/comments/:commentId/resolve', auth, async (req, res) => {
-  const docResult = await pool.query('SELECT * FROM documents WHERE id = $1 AND user_id = $2', [req.params.docId, req.user.id]);
-  if (docResult.rows.length === 0) {
-    return res.status(404).json({ error: 'Document not found' });
-  }
+// ==================== PROPERTY ROUTES ====================
 
-  const commentResult = await pool.query('SELECT * FROM comments WHERE id = $1 AND document_id = $2', [req.params.commentId, req.params.docId]);
-  if (commentResult.rows.length === 0) {
-    return res.status(404).json({ error: 'Comment not found' });
+// Get properties
+app.get('/api/properties', auth, async (req, res) => {
+  try {
+    const { page = 1, limit = 20, status, county } = req.query;
+    const offset = (page - 1) * limit;
+    
+    let queryStr = `SELECT p.*, u.full_name as owner_name
+                   FROM properties p
+                   JOIN users u ON p.owner_id = u.id
+                   WHERE 1=1`;
+    const params = [];
+    
+    // Landlords see their own properties, tenants see available ones
+    if (req.user.role === 'landlord') {
+      params.push(req.user.id);
+      queryStr += ` AND p.owner_id = $${params.length}`;
+    } else if (req.user.role === 'tenant') {
+      queryStr += ` AND p.status = 'available'`;
+    }
+    
+    if (status) {
+      params.push(status);
+      queryStr += ` AND p.status = $${params.length}`;
+    }
+    
+    if (county) {
+      params.push(county);
+      queryStr += ` AND p.county = $${params.length}`;
+    }
+    
+    queryStr += ` ORDER BY p.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(limit, offset);
+    
+    const result = await db.query(queryStr, params);
+    const count = await db.query('SELECT COUNT(*) FROM properties');
+    
+    res.json({
+      properties: result.rows,
+      total: parseInt(count.rows[0].count),
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to get properties' });
   }
+});
 
-  const result = await pool.query(
-    'UPDATE comments SET resolved = TRUE, resolved_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *',
-    [req.params.commentId]
-  );
-  res.json(result.rows[0]);
+// Create property
+app.post('/api/properties', auth, requireRole('landlord', 'admin'), [
+  body('address').notEmpty().isLength({ max: 500 }),
+  body('city').notEmpty().isLength({ max: 100 }),
+  body('county').isIn(Object.keys(TEXAS_COUNTIES)),
+  body('zipCode').matches(/^\d{5}(-\d{4})?$/),
+  body('rentAmount').isFloat({ min: 0 }),
+  body('bedrooms').isInt({ min: 0, max: 20 }),
+  body('bathrooms').isFloat({ min: 0.5, max: 20 }),
+  body('squareFeet').optional().isInt({ min: 1 }),
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+    
+    const {
+      address, city, county, state = 'TX', zipCode,
+      rentAmount, bedrooms, bathrooms, squareFeet,
+      description, amenities, petPolicy,
+    } = req.body;
+    
+    const result = await db.query(
+      `INSERT INTO properties (owner_id, address, city, county, state, zip_code, rent_amount,
+       bedrooms, bathrooms, square_feet, description, amenities, pet_policy, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+       RETURNING *`,
+      [req.user.id, sanitizeInput(address), sanitizeInput(city), county, state,
+       zipCode, rentAmount, bedrooms, bathrooms, squareFeet,
+       sanitizeInput(description), JSON.stringify(amenities || []), sanitizeInput(petPolicy)]
+    );
+    
+    await logAuditEvent(req.user.id, 'CREATE_PROPERTY', 'property', result.rows[0].id, { ip: req.ip });
+    
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    logger.error('Create property error', { error: err.message });
+    res.status(500).json({ error: 'Failed to create property' });
+  }
+});
+
+// Get property by ID
+app.get('/api/properties/:id', auth, [
+  param('id').isUUID(),
+], async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT p.*, u.full_name as owner_name, u.email as owner_email
+       FROM properties p
+       JOIN users u ON p.owner_id = u.id
+       WHERE p.id = $1`,
+      [req.params.id]
+    );
+    
+    if (!result.rows[0]) {
+      return res.status(404).json({ error: 'Property not found' });
+    }
+    
+    // Get signed URLs for images
+    if (result.rows[0].images) {
+      result.rows[0].imageUrls = await Promise.all(
+        result.rows[0].images.map(key => getSignedUrl(key))
+      );
+    }
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to get property' });
+  }
+});
+
+// Update property
+app.put('/api/properties/:id', auth, requireRole('landlord', 'admin'), async (req, res) => {
+  try {
+    const result = await db.query('SELECT owner_id FROM properties WHERE id = $1', [req.params.id]);
+    
+    if (!result.rows[0]) {
+      return res.status(404).json({ error: 'Property not found' });
+    }
+    
+    if (result.rows[0].owner_id !== req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+    
+    const { address, city, rentAmount, status, description, amenities, petPolicy } = req.body;
+    
+    await db.query(
+      `UPDATE properties SET
+       address = COALESCE($1, address),
+       city = COALESCE($2, city),
+       rent_amount = COALESCE($3, rent_amount),
+       status = COALESCE($4, status),
+       description = COALESCE($5, description),
+       amenities = COALESCE($6, amenities),
+       pet_policy = COALESCE($7, pet_policy),
+       updated_at = NOW()
+       WHERE id = $8`,
+      [sanitizeInput(address), sanitizeInput(city), rentAmount, status,
+       sanitizeInput(description), JSON.stringify(amenities), sanitizeInput(petPolicy), req.params.id]
+    );
+    
+    res.json({ message: 'Property updated' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update property' });
+  }
+});
+
+// Upload property images
+app.post('/api/properties/:id/images', auth, requireRole('landlord', 'admin'),
+  upload.array('images', 10), async (req, res) => {
+  try {
+    const property = await db.query(
+      'SELECT owner_id, images FROM properties WHERE id = $1',
+      [req.params.id]
+    );
+    
+    if (!property.rows[0]) {
+      return res.status(404).json({ error: 'Property not found' });
+    }
+    
+    if (property.rows[0].owner_id !== req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+    
+    const uploadPromises = req.files.map(file =>
+      uploadToS3(file.buffer, file.originalname, file.mimetype)
+    );
+    
+    const keys = await Promise.all(uploadPromises);
+    const currentImages = property.rows[0].images || [];
+    const allImages = [...currentImages, ...keys];
+    
+    await db.query(
+      'UPDATE properties SET images = $1 WHERE id = $2',
+      [JSON.stringify(allImages), req.params.id]
+    );
+    
+    const urls = await Promise.all(keys.map(key => getSignedUrl(key)));
+    res.json({ message: 'Images uploaded', urls });
+  } catch (err) {
+    res.status(500).json({ error: 'Upload failed' });
+  }
+});
+
+// ==================== LEASE DOCUMENT ROUTES ====================
+
+// Get lease documents
+app.get('/api/leases', auth, async (req, res) => {
+  try {
+    const { page = 1, limit = 20, status } = req.query;
+    const offset = (page - 1) * limit;
+    
+    let queryStr = `
+      SELECT l.*, 
+             p.address as property_address,
+             landlord.full_name as landlord_name,
+             tenant.full_name as tenant_name
+      FROM leases l
+      JOIN properties p ON l.property_id = p.id
+      JOIN users landlord ON l.landlord_id = landlord.id
+      JOIN users tenant ON l.tenant_id = tenant.id
+      WHERE 1=1`;
+    const params = [];
+    
+    if (req.user.role === 'landlord') {
+      params.push(req.user.id);
+      queryStr += ` AND l.landlord_id = $${params.length}`;
+    } else if (req.user.role === 'tenant') {
+      params.push(req.user.id);
+      queryStr += ` AND l.tenant_id = $${params.length}`;
+    }
+    
+    if (status) {
+      params.push(status);
+      queryStr += ` AND l.status = $${params.length}`;
+    }
+    
+    queryStr += ` ORDER BY l.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(limit, offset);
+    
+    const result = await db.query(queryStr, params);
+    res.json({ leases: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to get leases' });
+  }
+});
+
+// Create lease document
+app.post('/api/leases', auth, requireRole('landlord', 'admin'), [
+  body('propertyId').isUUID(),
+  body('tenantEmail').isEmail(),
+  body('startDate').isISO8601(),
+  body('endDate').isISO8601(),
+  body('rentAmount').isFloat({ min: 0 }),
+  body('securityDeposit').isFloat({ min: 0 }),
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+    
+    const {
+      propertyId, tenantEmail, startDate, endDate,
+      rentAmount, securityDeposit, terms, specialClauses,
+    } = req.body;
+    
+    // Get tenant
+    const tenantResult = await db.query('SELECT id FROM users WHERE email = $1', [tenantEmail]);
+    if (!tenantResult.rows[0]) {
+      return res.status(404).json({ error: 'Tenant not found' });
+    }
+    
+    // Get property
+    const propertyResult = await db.query(
+      'SELECT * FROM properties WHERE id = $1 AND owner_id = $2',
+      [propertyId, req.user.id]
+    );
+    if (!propertyResult.rows[0]) {
+      return res.status(404).json({ error: 'Property not found' });
+    }
+    
+    const property = propertyResult.rows[0];
+    const tenant = tenantResult.rows[0];
+    const taxInfo = calculateTax(rentAmount, property.county);
+    
+    // Create lease record
+    const leaseResult = await db.query(
+      `INSERT INTO leases (landlord_id, tenant_id, property_id, start_date, end_date,
+       rent_amount, security_deposit, tax_info, terms, special_clauses, status, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'draft', NOW())
+       RETURNING *`,
+      [req.user.id, tenant.id, propertyId, startDate, endDate,
+       rentAmount, securityDeposit, JSON.stringify(taxInfo),
+       sanitizeInput(terms), sanitizeInput(specialClauses)]
+    );
+    
+    const lease = leaseResult.rows[0];
+    
+    // Send notification to tenant
+    await sendEmail(
+      tenantEmail,
+      'Lease Agreement Ready for Review',
+      `<p>Your landlord has prepared a lease agreement for ${property.address}. Please log in to LeaseSign to review and sign.</p>`,
+      `A lease agreement has been prepared for ${property.address}. Log in to review.`
+    );
+    
+    await logAuditEvent(req.user.id, 'CREATE_LEASE', 'lease', lease.id, { ip: req.ip });
+    
+    res.status(201).json(lease);
+  } catch (err) {
+    logger.error('Create lease error', { error: err.message });
+    res.status(500).json({ error: 'Failed to create lease' });
+  }
+});
+
+// Get lease by ID
+app.get('/api/leases/:id', auth, [
+  param('id').isUUID(),
+], async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT l.*,
+              p.address as property_address, p.city, p.county,
+              landlord.full_name as landlord_name, landlord.email as landlord_email,
+              tenant.full_name as tenant_name, tenant.email as tenant_email
+       FROM leases l
+       JOIN properties p ON l.property_id = p.id
+       JOIN users landlord ON l.landlord_id = landlord.id
+       JOIN users tenant ON l.tenant_id = tenant.id
+       WHERE l.id = $1`,
+      [req.params.id]
+    );
+    
+    if (!result.rows[0]) {
+      return res.status(404).json({ error: 'Lease not found' });
+    }
+    
+    const lease = result.rows[0];
+    
+    // Check access
+    if (lease.landlord_id !== req.user.id && lease.tenant_id !== req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+    
+    // Get signed document URL if exists
+    if (lease.document_s3_key) {
+      lease.documentUrl = await getSignedUrl(lease.document_s3_key);
+    }
+    
+    res.json(lease);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to get lease' });
+  }
+});
+
+// Send lease for signing via DocuSign
+app.post('/api/leases/:id/send-for-signing', auth, requireRole('landlord', 'admin'), async (req, res) => {
+  try {
+    const leaseResult = await db.query(
+      `SELECT l.*, p.address, landlord.full_name as landlord_name, landlord.email as landlord_email,
+              tenant.full_name as tenant_name, tenant.email as tenant_email
+       FROM leases l
+       JOIN properties p ON l.property_id = p.id
+       JOIN users landlord ON l.landlord_id = landlord.id
+       JOIN users tenant ON l.tenant_id = tenant.id
+       WHERE l.id = $1 AND l.landlord_id = $2`,
+      [req.params.id, req.user.id]
+    );
+    
+    if (!leaseResult.rows[0]) {
+      return res.status(404).json({ error: 'Lease not found' });
+    }
+    
+    const lease = leaseResult.rows[0];
+    
+    if (lease.status !== 'draft') {
+      return res.status(400).json({ error: 'Lease is not in draft status' });
+    }
+    
+    // Generate PDF (simplified - in production use a PDF library)
+    const documentBase64 = Buffer.from(`LEASE AGREEMENT\n${JSON.stringify(lease, null, 2)}`).toString('base64');
+    
+    // Create DocuSign envelope
+    const envelope = await createLeaseEnvelope(
+      { documentBase64, propertyAddress: lease.address },
+      [
+        { email: lease.landlord_email, name: lease.landlord_name },
+        { email: lease.tenant_email, name: lease.tenant_name },
+      ]
+    );
+    
+    // Update lease
+    await db.query(
+      `UPDATE leases SET status = 'pending_signatures', docusign_envelope_id = $1,
+       sent_for_signing_at = NOW() WHERE id = $2`,
+      [envelope.envelopeId, lease.id]
+    );
+    
+    await logAuditEvent(req.user.id, 'SEND_FOR_SIGNING', 'lease', lease.id, { envelopeId: envelope.envelopeId });
+    
+    res.json({ message: 'Lease sent for signing', envelopeId: envelope.envelopeId });
+  } catch (err) {
+    logger.error('Send for signing error', { error: err.message });
+    res.status(500).json({ error: 'Failed to send for signing' });
+  }
+});
+
+// DocuSign webhook
+app.post('/api/webhooks/docusign', express.raw({ type: 'application/json' }), async (req, res) => {
+  try {
+    const event = JSON.parse(req.body);
+    const { envelopeId, status } = event;
+    
+    if (status === 'completed') {
+      await db.query(
+        `UPDATE leases SET status = 'signed', signed_at = NOW() WHERE docusign_envelope_id = $1`,
+        [envelopeId]
+      );
+      
+      // Download signed document and store in S3
+      const leaseResult = await db.query(
+        'SELECT * FROM leases WHERE docusign_envelope_id = $1',
+        [envelopeId]
+      );
+      
+      if (leaseResult.rows[0]) {
+        // Notify both parties
+        logger.info('Lease signed', { leaseId: leaseResult.rows[0].id });
+      }
+    }
+    
+    res.json({ received: true });
+  } catch (err) {
+    logger.error('DocuSign webhook error', { error: err.message });
+    res.status(500).json({ error: 'Webhook processing failed' });
+  }
+});
+
+// ==================== PAYMENT ROUTES ====================
+
+// Create payment intent
+app.post('/api/payments/create-intent', auth, paymentLimiter, [
+  body('leaseId').isUUID(),
+  body('type').isIn(['first_month', 'security_deposit', 'monthly_rent', 'late_fee']),
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+    
+    const { leaseId, type } = req.body;
+    
+    const leaseResult = await db.query(
+      `SELECT l.*, p.county FROM leases l
+       JOIN properties p ON l.property_id = p.id
+       WHERE l.id = $1 AND (l.landlord_id = $2 OR l.tenant_id = $2)`,
+      [leaseId, req.user.id]
+    );
+    
+    if (!leaseResult.rows[0]) {
+      return res.status(404).json({ error: 'Lease not found' });
+    }
+    
+    const lease = leaseResult.rows[0];
+    
+    let amount;
+    switch (type) {
+      case 'first_month':
+        amount = lease.rent_amount;
+        break;
+      case 'security_deposit':
+        amount = lease.security_deposit;
+        break;
+      case 'monthly_rent':
+        amount = lease.rent_amount;
+        break;
+      case 'late_fee':
+        amount = lease.rent_amount * 0.1; // 10% late fee
+        break;
+    }
+    
+    const taxInfo = calculateTax(amount, lease.county);
+    const totalAmount = Math.round(taxInfo.total * 100); // Convert to cents
+    
+    // Get or create Stripe customer
+    let customerId = req.user.stripe_customer_id;
+    if (!customerId) {
+      const customer = await stripe.customers.create({
+        email: req.user.email,
+        name: req.user.full_name,
+        metadata: { userId: req.user.id },
+      });
+      customerId = customer.id;
+      await db.query(
+        'UPDATE users SET stripe_customer_id = $1 WHERE id = $2',
+        [customerId, req.user.id]
+      );
+    }
+    
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: totalAmount,
+      currency: 'usd',
+      customer: customerId,
+      metadata: {
+        leaseId,
+        paymentType: type,
+        userId: req.user.id,
+        taxAmount: taxInfo.taxAmount,
+        county: lease.county,
+      },
+      description: `LeaseSign: ${type} for lease ${leaseId}`,
+    });
+    
+    // Record payment intent
+    await db.query(
+      `INSERT INTO payments (lease_id, user_id, amount, tax_amount, total_amount, type,
+       stripe_payment_intent_id, status, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', NOW())`,
+      [leaseId, req.user.id, amount, taxInfo.taxAmount, taxInfo.total,
+       type, paymentIntent.id]
+    );
+    
+    res.json({
+      clientSecret: paymentIntent.client_secret,
+      amount: taxInfo.total,
+      breakdown: taxInfo,
+    });
+  } catch (err) {
+    logger.error('Create payment intent error', { error: err.message });
+    res.status(500).json({ error: 'Failed to create payment intent' });
+  }
+});
+
+// Stripe webhook
+app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  let event;
+  
+  try {
+    event = stripe.webhooks.constructEvent(
+      req.body,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
+  } catch (err) {
+    return res.status(400).json({ error: `Webhook error: ${err.message}` });
+  }
+  
+  try {
+    switch (event.type) {
+      case 'payment_intent.succeeded': {
+        const { id: paymentIntentId, metadata } = event.data.object;
+        
+        await db.query(
+          `UPDATE payments SET status = 'completed', completed_at = NOW()
+           WHERE stripe_payment_intent_id = $1`,
+          [paymentIntentId]
+        );
+        
+        // Update lease payment status
+        if (metadata.paymentType === 'first_month') {
+          await db.query(
+            `UPDATE leases SET first_month_paid = true, payment_status = 'paid' WHERE id = $1`,
+            [metadata.leaseId]
+          );
+        }
+        
+        await logAuditEvent(metadata.userId, 'PAYMENT_SUCCESS', 'payment', paymentIntentId, metadata);
+        
+        // Notify parties
+        const leaseResult = await db.query(
+          `SELECT l.*, tenant.email as tenant_email, landlord.email as landlord_email
+           FROM leases l
+           JOIN users tenant ON l.tenant_id = tenant.id
+           JOIN users landlord ON l.landlord_id = landlord.id
+           WHERE l.id = $1`,
+          [metadata.leaseId]
+        );
+        
+        if (leaseResult.rows[0]) {
+          await sendEmail(
+            leaseResult.rows[0].landlord_email,
+            'Payment Received',
+            `<p>A payment of $${event.data.object.amount / 100} has been received for your lease.</p>`,
+            `Payment received for your lease.`
+          );
+        }
+        break;
+      }
+      
+      case 'payment_intent.payment_failed': {
+        const { id: paymentIntentId } = event.data.object;
+        await db.query(
+          `UPDATE payments SET status = 'failed' WHERE stripe_payment_intent_id = $1`,
+          [paymentIntentId]
+        );
+        break;
+      }
+    }
+    
+    res.json({ received: true });
+  } catch (err) {
+    logger.error('Stripe webhook processing error', { error: err.message });
+    res.status(500).json({ error: 'Webhook processing failed' });
+  }
+});
+
+// Get payment history
+app.get('/api/payments', auth, async (req, res) => {
+  try {
+    const { leaseId, page = 1, limit = 20 } = req.query;
+    const offset = (page - 1) * limit;
+    
+    let queryStr = `SELECT p.*, l.property_id FROM payments p
+                   JOIN leases l ON p.lease_id = l.id
+                   WHERE (l.landlord_id = $1 OR l.tenant_id = $1)`;
+    const params = [req.user.id];
+    
+    if (leaseId) {
+      params.push(leaseId);
+      queryStr += ` AND p.lease_id = $${params.length}`;
+    }
+    
+    queryStr += ` ORDER BY p.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(limit, offset);
+    
+    const result = await db.query(queryStr, params);
+    res.json({ payments: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to get payments' });
+  }
 });
 
 // ==================== DOCUMENT ROUTES ====================
 
-app.get('/api/documents', auth, async (req, res) => {
-  const result = await pool.query(
-    'SELECT * FROM documents WHERE user_id = $1 AND (is_template = FALSE OR is_template IS NULL) ORDER BY updated_at DESC',
-    [req.user.id]
-  );
-  res.json(result.rows.map(docRowToObject));
-});
-
-app.get('/api/documents/:id', auth, async (req, res) => {
-  const result = await pool.query('SELECT * FROM documents WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
-  if (result.rows.length === 0) {
-    return res.status(404).json({ error: 'Document not found' });
-  }
-  res.json(docRowToObject(result.rows[0]));
-});
-
-app.post('/api/documents', auth, async (req, res) => {
+// Upload document
+app.post('/api/documents', auth, upload.single('document'), async (req, res) => {
   try {
-    const { title, ...docData } = req.body;
-    if (Array.isArray(docData.additionalTenants)) {
-      docData.additionalTenants = docData.additionalTenants.map(t => ({
-        name: t.name || '',
-        email: t.email || '',
-        phone: t.phone || '',
-        signToken: uuidv4(),
-        signature: null,
-        signedAt: null,
-        signedIp: null
-      }));
-    } else {
-      docData.additionalTenants = [];
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
     }
-    const result = await pool.query(
-      `INSERT INTO documents (user_id, status, title, data, landlord_sign_token, tenant_sign_token)
-       VALUES ($1, 'draft', $2, $3, $4, $5) RETURNING *`,
-      [req.user.id, title || null, JSON.stringify(docData), uuidv4(), uuidv4()]
+    
+    const { leaseId, type, description } = req.body;
+    
+    const key = await uploadToS3(
+      req.file.buffer,
+      req.file.originalname,
+      req.file.mimetype
     );
-
-    const doc = docRowToObject(result.rows[0]);
-    await logAudit(doc.id, 'DOCUMENT_CREATED', req.user.email, req);
-    res.json(doc);
-  } catch (e) {
-    console.error('Create error:', e);
-    res.status(500).json({ error: 'Failed to create document' });
-  }
-});
-
-app.put('/api/documents/:id', auth, async (req, res) => {
-  const docResult = await pool.query('SELECT * FROM documents WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
-  if (docResult.rows.length === 0) {
-    return res.status(404).json({ error: 'Document not found' });
-  }
-
-  const doc = docRowToObject(docResult.rows[0]);
-  if (doc.status === 'completed') {
-    return res.status(400).json({ error: 'Cannot modify completed document' });
-  }
-
-  const { title, status, ...docData } = req.body;
-  const existingData = docResult.rows[0].data || {};
-  if (Array.isArray(docData.additionalTenants)) {
-    docData.additionalTenants = docData.additionalTenants.map((t, i) => {
-      const existing = existingData.additionalTenants?.[i];
-      return {
-        name: t.name || '',
-        email: t.email || '',
-        phone: t.phone || '',
-        signToken: existing?.signToken || uuidv4(),
-        signature: existing?.signature || null,
-        signedAt: existing?.signedAt || null,
-        signedIp: existing?.signedIp || null
-      };
+    
+    const result = await db.query(
+      `INSERT INTO documents (lease_id, uploaded_by, s3_key, filename, file_size, file_type, type, description, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+       RETURNING *`,
+      [leaseId, req.user.id, key, req.file.originalname, req.file.size,
+       req.file.mimetype, type, sanitizeInput(description)]
+    );
+    
+    await logAuditEvent(req.user.id, 'UPLOAD_DOCUMENT', 'document', result.rows[0].id, {
+      filename: req.file.originalname,
+      size: req.file.size,
     });
+    
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    logger.error('Document upload error', { error: err.message });
+    res.status(500).json({ error: 'Upload failed' });
   }
-  const mergedData = { ...existingData, ...docData };
-
-  const result = await pool.query(
-    `UPDATE documents SET title = COALESCE($1, title), data = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3 RETURNING *`,
-    [title, JSON.stringify(mergedData), req.params.id]
-  );
-
-  await logAudit(doc.id, 'DOCUMENT_UPDATED', req.user.email, req);
-  res.json(docRowToObject(result.rows[0]));
 });
 
-app.delete('/api/documents/:id', auth, async (req, res) => {
-  const result = await pool.query('DELETE FROM documents WHERE id = $1 AND user_id = $2 RETURNING id', [req.params.id, req.user.id]);
-  if (result.rows.length === 0) {
-    return res.status(404).json({ error: 'Document not found' });
-  }
-  res.json({ success: true });
-});
-
-// ==================== SIGNATURE WORKFLOW ====================
-
-app.post('/api/documents/:id/send', auth, async (req, res) => {
+// Get documents
+app.get('/api/documents', auth, async (req, res) => {
   try {
-    const docResult = await pool.query('SELECT * FROM documents WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
-    if (docResult.rows.length === 0) {
+    const { leaseId } = req.query;
+    
+    const result = await db.query(
+      `SELECT d.* FROM documents d
+       JOIN leases l ON d.lease_id = l.id
+       WHERE d.lease_id = $1 AND (l.landlord_id = $2 OR l.tenant_id = $2)`,
+      [leaseId, req.user.id]
+    );
+    
+    // Generate signed URLs
+    const docs = await Promise.all(result.rows.map(async (doc) => ({
+      ...doc,
+      url: await getSignedUrl(doc.s3_key),
+    })));
+    
+    res.json({ documents: docs });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to get documents' });
+  }
+});
+
+// Download document
+app.get('/api/documents/:id/download', auth, async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT d.* FROM documents d
+       JOIN leases l ON d.lease_id = l.id
+       WHERE d.id = $1 AND (l.landlord_id = $2 OR l.tenant_id = $2)`,
+      [req.params.id, req.user.id]
+    );
+    
+    if (!result.rows[0]) {
       return res.status(404).json({ error: 'Document not found' });
     }
+    
+    const url = await getSignedUrl(result.rows[0].s3_key, 60);
+    res.redirect(url);
+  } catch (err) {
+    res.status(500).json({ error: 'Download failed' });
+  }
+});
 
-    const doc = docRowToObject(docResult.rows[0]);
+// ==================== NOTIFICATION ROUTES ====================
 
-    // Set link expiration (7 days from now)
-    const linkExpiresAt = new Date(Date.now() + LINK_EXPIRATION_MS);
-
-    // Update status and expiration
-    const result = await pool.query(
-      `UPDATE documents SET status = 'pending', link_expires_at = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *`,
-      [linkExpiresAt, req.params.id]
+// Get notifications
+app.get('/api/notifications', auth, async (req, res) => {
+  try {
+    const { unreadOnly = false, page = 1, limit = 20 } = req.query;
+    const offset = (page - 1) * limit;
+    
+    let queryStr = 'SELECT * FROM notifications WHERE user_id = $1';
+    const params = [req.user.id];
+    
+    if (unreadOnly === 'true') {
+      queryStr += ' AND read_at IS NULL';
+    }
+    
+    queryStr += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(limit, offset);
+    
+    const result = await db.query(queryStr, params);
+    const unreadCount = await db.query(
+      'SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND read_at IS NULL',
+      [req.user.id]
     );
-    const updated = docRowToObject(result.rows[0]);
-
-    // Send email to landlord
-    const signUrl = `${APP_URL}/sign/${doc.landlordSignToken}`;
-    await mailer.sendMail({
-      from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
-      to: doc.landlordEmail,
-      subject: `[Action Required] Sign Lease for ${doc.propertyAddress}`,
-      text: `Please sign the lease agreement: ${signUrl}`,
-      html: generateSignEmail(updated, 'landlord', signUrl)
-    });
-
-    // Send SMS if phone number available
-    if (doc.landlordPhone) {
-      await sendSMS(doc.landlordPhone, `LeaseSign: Please sign the lease for ${doc.propertyAddress}. Link: ${signUrl}`);
-    }
-
-    await logAudit(doc.id, 'SENT_FOR_SIGNATURE', req.user.email, req, { to: doc.landlordEmail });
-    await createNotification(req.user.id, 'sent', 'Document Sent', `Lease for ${doc.propertyAddress} sent to ${doc.landlordEmail}`, doc.id);
-    res.json(updated);
-  } catch (e) {
-    console.error('Send error:', e);
-    res.status(500).json({ error: 'Failed to send document' });
-  }
-});
-
-// Public signing endpoint - get document
-app.get('/api/sign/:token', async (req, res) => {
-  const result = await pool.query(
-    `SELECT * FROM documents
-     WHERE landlord_sign_token = $1
-        OR tenant_sign_token = $1
-        OR (jsonb_typeof(data->'additionalTenants') = 'array'
-            AND data->'additionalTenants' @> jsonb_build_array(jsonb_build_object('signToken', $1)))`,
-    [req.params.token]
-  );
-
-  if (result.rows.length === 0) return res.status(404).json({ error: 'Document not found or link expired' });
-
-  const doc = docRowToObject(result.rows[0]);
-
-  // Check if link has expired
-  if (doc.linkExpiresAt && new Date(doc.linkExpiresAt) < new Date()) {
-    return res.status(410).json({ error: 'This signing link has expired. Please contact the sender to request a new link.', expired: true });
-  }
-
-  let signerType, tenantIndex = -1;
-  if (doc.landlordSignToken === req.params.token) {
-    signerType = 'landlord';
-  } else if (doc.tenantSignToken === req.params.token) {
-    signerType = 'tenant';
-  } else {
-    tenantIndex = (doc.additionalTenants || []).findIndex(t => t.signToken === req.params.token);
-    signerType = 'additional_tenant';
-  }
-
-  if (signerType === 'landlord' && doc.landlordSignedAt)
-    return res.status(400).json({ error: 'Already signed by landlord' });
-  if (signerType === 'tenant' && doc.tenantSignedAt)
-    return res.status(400).json({ error: 'Already signed by tenant' });
-  if (signerType === 'additional_tenant' && doc.additionalTenants[tenantIndex]?.signedAt)
-    return res.status(400).json({ error: 'Already signed' });
-
-  // Remove sensitive tokens
-  const safeDoc = { ...doc };
-  delete safeDoc.landlordSignToken;
-  delete safeDoc.tenantSignToken;
-  delete safeDoc.userId;
-  if (Array.isArray(safeDoc.additionalTenants)) {
-    safeDoc.additionalTenants = safeDoc.additionalTenants.map(({ signToken, ...t }) => t);
-  }
-
-  const response = { document: safeDoc, signerType };
-  if (signerType === 'additional_tenant') response.tenantIndex = tenantIndex;
-  res.json(response);
-});
-
-// Public signing endpoint - submit signature
-app.post('/api/sign/:token', async (req, res) => {
-  try {
-    const { signature } = req.body;
-    if (!signature) return res.status(400).json({ error: 'Signature required' });
-
-    const result = await pool.query(
-      `SELECT * FROM documents
-       WHERE landlord_sign_token = $1
-          OR tenant_sign_token = $1
-          OR (jsonb_typeof(data->'additionalTenants') = 'array'
-              AND data->'additionalTenants' @> jsonb_build_array(jsonb_build_object('signToken', $1)))`,
-      [req.params.token]
-    );
-
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
-
-    const doc = docRowToObject(result.rows[0]);
-    const rawData = result.rows[0].data || {};
-
-    if (doc.linkExpiresAt && new Date(doc.linkExpiresAt) < new Date()) {
-      return res.status(410).json({ error: 'This signing link has expired. Please contact the sender to request a new link.', expired: true });
-    }
-
-    let signerType, tenantIndex = -1;
-    if (doc.landlordSignToken === req.params.token) {
-      signerType = 'landlord';
-    } else if (doc.tenantSignToken === req.params.token) {
-      signerType = 'tenant';
-    } else {
-      tenantIndex = (doc.additionalTenants || []).findIndex(t => t.signToken === req.params.token);
-      signerType = 'additional_tenant';
-    }
-
-    const ip = req.ip || req.connection?.remoteAddress || 'unknown';
-    const now = new Date();
-    let updateResult;
-
-    if (signerType === 'landlord') {
-      const newExpiration = new Date(Date.now() + LINK_EXPIRATION_MS);
-
-      updateResult = await pool.query(
-        `UPDATE documents SET
-          landlord_signature = $1, landlord_signed_at = $2, landlord_signed_ip = $3,
-          link_expires_at = $4, status = 'partial', updated_at = CURRENT_TIMESTAMP
-         WHERE id = $5 RETURNING *`,
-        [signature, now, ip, newExpiration, doc.id]
-      );
-
-      await logAudit(doc.id, 'LANDLORD_SIGNED', doc.landlordEmail, req);
-      const updatedDoc = docRowToObject(updateResult.rows[0]);
-
-      // Send email to primary tenant
-      const tenantSignUrl = `${APP_URL}/sign/${doc.tenantSignToken}`;
-      await mailer.sendMail({
-        from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
-        to: doc.tenantEmail,
-        subject: `[Action Required] Sign Lease for ${doc.propertyAddress}`,
-        text: `Please sign the lease agreement: ${tenantSignUrl}`,
-        html: generateSignEmail(updatedDoc, 'tenant', tenantSignUrl)
-      });
-      if (doc.tenantPhone) {
-        await sendSMS(doc.tenantPhone, `LeaseSign: The landlord has signed! Please sign the lease for ${doc.propertyAddress}. Link: ${tenantSignUrl}`);
-      }
-
-      // Send email to each additional tenant
-      for (const t of (doc.additionalTenants || [])) {
-        if (t.email && t.signToken) {
-          const addSignUrl = `${APP_URL}/sign/${t.signToken}`;
-          await mailer.sendMail({
-            from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
-            to: t.email,
-            subject: `[Action Required] Sign Lease for ${doc.propertyAddress}`,
-            text: `Please sign the lease agreement: ${addSignUrl}`,
-            html: generateSignEmail({ ...updatedDoc, tenantName: t.name }, 'tenant', addSignUrl)
-          });
-        }
-      }
-
-      await createNotification(doc.userId, 'signed', 'Landlord Signed', `${doc.landlordName} signed the lease for ${doc.propertyAddress}`, doc.id);
-    } else if (signerType === 'tenant') {
-      const allAdditionalSigned = !(doc.additionalTenants?.length) ||
-        doc.additionalTenants.every(t => t.signedAt);
-      const newStatus = (doc.landlordSignedAt && allAdditionalSigned) ? 'completed' : 'partial';
-
-      updateResult = await pool.query(
-        `UPDATE documents SET
-          tenant_signature = $1, tenant_signed_at = $2, tenant_signed_ip = $3,
-          status = $4, updated_at = CURRENT_TIMESTAMP
-         WHERE id = $5 RETURNING *`,
-        [signature, now, ip, newStatus, doc.id]
-      );
-
-      await logAudit(doc.id, 'TENANT_SIGNED', doc.tenantEmail, req);
-      await createNotification(doc.userId, 'signed', 'Tenant Signed', `${doc.tenantName} signed the lease for ${doc.propertyAddress}`, doc.id);
-    } else {
-      // Additional tenant signing — update their entry in the JSONB data
-      const updatedTenants = doc.additionalTenants.map((t, i) =>
-        i === tenantIndex ? { ...t, signature, signedAt: now.toISOString(), signedIp: ip } : t
-      );
-      const updatedData = { ...rawData, additionalTenants: updatedTenants };
-      const allAdditionalSigned = updatedTenants.every(t => t.signedAt);
-      const newStatus = (doc.landlordSignedAt && doc.tenantSignedAt && allAdditionalSigned) ? 'completed' : 'partial';
-
-      updateResult = await pool.query(
-        `UPDATE documents SET data = $1, status = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3 RETURNING *`,
-        [JSON.stringify(updatedData), newStatus, doc.id]
-      );
-
-      const tenant = doc.additionalTenants[tenantIndex];
-      await logAudit(doc.id, 'ADDITIONAL_TENANT_SIGNED', tenant.email, req);
-      await createNotification(doc.userId, 'signed', 'Co-Tenant Signed', `${tenant.name} signed the lease for ${doc.propertyAddress}`, doc.id);
-    }
-
-    const updated = docRowToObject(updateResult.rows[0]);
-
-    if (updated.status === 'completed') {
-      await sendCompletionEmails(updated);
-      await createNotification(doc.userId, 'completed', 'Lease Completed', `The lease for ${doc.propertyAddress} has been fully executed!`, doc.id);
-    }
-
-    res.json({ success: true, status: updated.status });
-  } catch (e) {
-    console.error('Sign error:', e);
-    res.status(500).json({ error: 'Signing failed' });
-  }
-});
-
-// ==================== PDF GENERATION ====================
-
-app.get('/api/documents/:id/pdf', auth, async (req, res) => {
-  const result = await pool.query('SELECT * FROM documents WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
-  if (result.rows.length === 0) {
-    return res.status(404).json({ error: 'Document not found' });
-  }
-
-  generatePDF(docRowToObject(result.rows[0]), res);
-});
-
-function generatePDF(doc, res) {
-  const pdf = new PDFDocument({ size: 'LETTER', margins: { top: 50, bottom: 50, left: 60, right: 60 } });
-
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename="Lease_${(doc.propertyAddress || 'document').replace(/[^a-zA-Z0-9]/g, '_')}.pdf"`);
-
-  pdf.pipe(res);
-
-  generatePDFContent(pdf, doc);
-}
-
-function generatePDFContent(pdf, doc) {
-  // Page dimensions: LETTER = 612 x 792 points
-  // Margins: 60 left, 60 right = 492 usable width
-  const leftMargin = 60;
-  const textWidth = 492;
-
-  // Helper functions
-  const field = (val) => val || '________________________';
-  const money = (val) => val ? `$${parseFloat(val).toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '$____________';
-  const checkbox = (checked) => checked ? '[X]' : '[ ]';
-  let pageNum = 1;
-
-  const resetX = () => { pdf.x = leftMargin; };
-
-  const addHeader = () => {
-    pdf.font('Helvetica').fontSize(8).fillColor('#666666');
-    pdf.text('RESIDENTIAL LEASE - TAR 2001', leftMargin, 30, { width: textWidth });
-    pdf.text(`Page ${pageNum}`, 500, 30);
-    pdf.fillColor('#000000');
-    resetX();
-    pageNum++;
-  };
-
-  const addFooter = () => {
-    const y = pdf.page.height - 40;
-    pdf.font('Helvetica').fontSize(7).fillColor('#666666');
-    pdf.text(`${doc.propertyAddress || 'Property'} | Landlord: ${doc.landlordName || ''} | Tenant: ${doc.tenantName || ''}`, leftMargin, y, { width: textWidth, align: 'center' });
-    pdf.fillColor('#000000');
-    resetX();
-  };
-
-  const newPage = () => {
-    addFooter();
-    pdf.addPage();
-    addHeader();
-    pdf.y = 60;
-    resetX();
-  };
-
-  // Only use checkSpace for signature section - let PDFKit handle normal content flow
-  const checkSpace = (needed) => {
-    if (pdf.y > pdf.page.height - 50 - needed) newPage();
-  };
-
-  const sectionTitle = (num, title) => {
-    resetX();
-    pdf.font('Helvetica-Bold').fontSize(10).fillColor('#000000');
-    pdf.text(`${num}. ${title}`, { width: textWidth });
-    pdf.font('Helvetica').fontSize(9);
-    pdf.moveDown(0.3);
-    resetX();
-  };
-
-  const paragraph = (text) => {
-    resetX();
-    pdf.text(text, { width: textWidth });
-  };
-
-  const subSection = (letter, text) => {
-    resetX();
-    pdf.font('Helvetica-Bold').fontSize(9).text(`${letter}. `, { continued: true, width: textWidth });
-    pdf.font('Helvetica').fontSize(9).text(text, { width: textWidth - 20 });
-    pdf.moveDown(0.3);
-    resetX();
-  };
-
-  // ===== PAGE 1 - HEADER =====
-  addHeader();
-  pdf.y = 50;
-  resetX();
-
-  // Title Block
-  pdf.font('Helvetica-Bold').fontSize(16).text('RESIDENTIAL LEASE', leftMargin, pdf.y, { width: textWidth, align: 'center' });
-  resetX();
-  pdf.font('Helvetica').fontSize(8).text('USE OF THIS FORM BY PERSONS WHO ARE NOT MEMBERS OF THE TEXAS ASSOCIATION OF REALTORS IS NOT AUTHORIZED.', { width: textWidth, align: 'center' });
-  resetX();
-  pdf.text('Texas Association of REALTORS, Inc. 2022', { width: textWidth, align: 'center' });
-  pdf.moveDown(1.5);
-  resetX();
-
-  // Section 1: PARTIES
-  sectionTitle('1', 'PARTIES');
-  const allTenantNames = [doc.tenantName, ...(doc.additionalTenants || []).map(t => t.name)]
-    .filter(Boolean).join(', ');
-  paragraph(`The parties to this lease are: the owner of the Property (Landlord): ${field(doc.landlordName)}; and the following tenant(s) (collectively referred to as "Tenant"): ${field(allTenantNames)}.`);
-  pdf.moveDown();
-
-  // Section 2: PROPERTY
-  sectionTitle('2', 'PROPERTY');
-  paragraph(`Landlord leases to Tenant the real property described below together with all its improvements (collectively the "Property"):`);
-  pdf.moveDown(0.3);
-  subSection('A', `Address: ${field(doc.propertyAddress)}, ${field(doc.propertyCity)}, TX ${field(doc.propertyZip)}`);
-  subSection('B', `Legal Description: ${field(doc.legalDescription)}`);
-  subSection('C', `County: ${field(doc.propertyCounty)}`);
-  subSection('D', `Non-Real-Property Items: ${field(doc.nonRealPropertyItems || 'refrigerator, range/oven, dishwasher, disposal, microwave')}`);
-  pdf.moveDown();
-
-  // Section 3: TERM
-  sectionTitle('3', 'TERM');
-  subSection('A', 'Primary Term:');
-  paragraph(`   Commencement Date: ${field(doc.commencementDate)}`);
-  paragraph(`   Expiration Date: ${field(doc.expirationDate)} at 11:59 p.m.`);
-  subSection('B', 'Delay of Occupancy: If Tenant cannot occupy the Property on the Commencement Date because of construction, Tenant may terminate this lease by written notice before the Property is available.');
-  pdf.moveDown();
-
-  // Section 4: AUTOMATIC RENEWAL
-  sectionTitle('4', 'AUTOMATIC RENEWAL');
-  paragraph(`This lease automatically renews on a month-to-month basis unless either party provides written notice of termination at least ${field(doc.terminationNoticeDays || '30')} days before the Expiration Date.`);
-  pdf.moveDown();
-
-  // Section 5: RENT
-  sectionTitle('5', 'RENT');
-  subSection('A', `Monthly Rent: ${money(doc.monthlyRent)} due on or before the 1st day of each month.`);
-  if (doc.proratedRent) {
-    subSection('B', `Prorated Rent: ${money(doc.proratedRent)} due on or before ${field(doc.proratedDueDate)}.`);
-  }
-  subSection('C', 'Payment Method: ' + ([
-    doc.paymentCashiersCheck ? 'Cashier\'s Check' : '',
-    doc.paymentMoneyOrder ? 'Money Order' : '',
-    doc.paymentPersonalCheck ? 'Personal Check' : '',
-    doc.paymentElectronic ? 'Electronic Payment' : ''
-  ].filter(Boolean).join(', ') || 'Any acceptable form'));
-  subSection('D', `Place of Payment: ${field(doc.paymentName || doc.landlordName)}, ${field(doc.paymentAddress)}`);
-  pdf.moveDown();
-
-  // Section 6: LATE CHARGES
-  sectionTitle('6', 'LATE CHARGES');
-  paragraph(`If rent is not received by the ${field(doc.gracePeriodDay || '3')}rd day of each month at 11:59 p.m., Tenant will pay:`);
-  paragraph(`   (1) Initial late charge: ${money(doc.initialLateFee || 50)}`);
-  paragraph(`   (2) Additional daily charge: ${money(doc.dailyLateFee || 25)} per day until paid`);
-  pdf.moveDown();
-
-  // Section 7: RETURNED PAYMENTS
-  sectionTitle('7', 'RETURNED PAYMENTS');
-  paragraph(`Tenant will pay ${money(doc.returnedPaymentFee || 75)} for each returned or dishonored payment.`);
-  pdf.moveDown();
-
-  // Section 8: APPLICATION OF PAYMENTS
-  sectionTitle('8', 'APPLICATION OF PAYMENTS');
-  paragraph('Payments applied first to non-rent obligations (late charges, repairs, etc.), then to rent.');
-  pdf.moveDown();
-
-  // Section 9: ANIMALS
-  sectionTitle('9', 'ANIMALS');
-  paragraph(`${checkbox(!doc.petsAllowed)} No animals permitted  ${checkbox(doc.petsAllowed)} Animals permitted: ${field(doc.allowedPets)}`);
-  paragraph(`Unauthorized animal fee: ${money(doc.unauthorizedPetFee || 100)} per animal per day.`);
-  pdf.moveDown();
-
-  // Section 10: SECURITY DEPOSIT
-  sectionTitle('10', 'SECURITY DEPOSIT');
-  subSection('A', `Amount: ${money(doc.securityDeposit)}`);
-  subSection('B', 'Return within 30 days after Tenant surrenders Property, less lawful deductions.');
-  subSection('C', 'Deductions may include: unpaid rent, utilities, late charges, repairs, cleaning, key replacement.');
-  pdf.moveDown();
-
-  // Section 11: UTILITIES
-  sectionTitle('11', 'UTILITIES');
-  paragraph(`Tenant pays all utilities except: ${field(doc.landlordPaysUtilities || 'None')}`);
-  pdf.moveDown();
-
-  // Section 12: USE AND OCCUPANCY
-  sectionTitle('12', 'USE AND OCCUPANCY');
-  subSection('A', `Occupants: ${field(doc.occupants)}`);
-  subSection('B', 'Use: Residential purposes only. No business operations.');
-  subSection('C', `HOA: ${doc.hoaName ? 'Subject to ' + doc.hoaName : 'Not subject to HOA'}`);
-  subSection('D', `Guests: Maximum ${field(doc.maxGuestDays || '14')} consecutive days without written consent.`);
-  pdf.moveDown();
-
-  // Section 13: PARKING
-  sectionTitle('13', 'PARKING RULES');
-  paragraph(`Maximum ${field(doc.maxVehicles || '4')} vehicles. All must be operable with current registration. No commercial vehicles, trailers, or RVs without consent.`);
-  pdf.moveDown();
-
-  // Section 14: ACCESS BY LANDLORD
-  sectionTitle('14', 'ACCESS BY LANDLORD');
-  paragraph(`Landlord may enter at reasonable times with ${field(doc.accessNoticeHours || '24')} hours notice (except emergencies).`);
-  subSection('A', `Trip Charge: ${money(doc.tripCharge || 75)} if Tenant fails to permit access.`);
-  subSection('B', `Keybox: ${checkbox(doc.keyboxAuthorized)} Authorized during last ${field(doc.keyboxDays || '30')} days of lease.`);
-  pdf.moveDown();
-
-  // Section 15: MOVE-IN CONDITION
-  sectionTitle('15', 'MOVE-IN CONDITION');
-  paragraph(`${checkbox(doc.asIsCondition)} Tenant accepts Property as-is.`);
-  paragraph(`Inventory form due within ${field(doc.inventoryDays || '3')} days of possession.`);
-  pdf.moveDown();
-
-  // Section 16: MOVE-OUT
-  sectionTitle('16', 'MOVE-OUT');
-  paragraph('Tenant will: return all keys; remove personal property; leave Property in good condition; provide forwarding address.');
-  pdf.moveDown();
-
-  // Section 17: PROPERTY MAINTENANCE
-  sectionTitle('17', 'PROPERTY MAINTENANCE');
-  subSection('A', 'Tenant will: keep Property clean; dispose garbage; comply with laws and HOA rules; notify Landlord of needed repairs.');
-  subSection('B', `Yard: ${checkbox(doc.yardMaintenance === 'landlord')} Landlord ${checkbox(doc.yardMaintenance !== 'landlord')} Tenant maintains.`);
-  subSection('C', `Smoking: ${checkbox(doc.smokingAllowed)} Permitted ${checkbox(!doc.smokingAllowed)} NOT Permitted`);
-  subSection('D', 'HVAC Filters: Replace monthly or as directed.');
-  pdf.moveDown();
-
-  // Section 18: REPAIRS
-  sectionTitle('18', 'REPAIRS');
-  subSection('A', `Contact for repairs: ${field(doc.emergencyContact || doc.landlordName)} at ${field(doc.landlordPhone || doc.landlordEmail)}`);
-  subSection('B', 'Tenant pays for repairs caused by Tenant, guests, or animals.');
-  pdf.moveDown();
-
-  // Section 19-25: Condensed legal sections
-  sectionTitle('19', 'SECURITY DEVICES');
-  paragraph('Per Texas Property Code 92.153. Rekeying costs paid by: ' + (doc.rekeyPaidByLandlord ? 'Landlord' : 'Tenant'));
-  pdf.moveDown();
-
-  sectionTitle('20', 'SMOKE ALARMS');
-  paragraph('Landlord installs per code. Tenant tests monthly and replaces batteries.');
-  pdf.moveDown();
-
-  sectionTitle('21', 'LIABILITY');
-  paragraph('Landlord not liable for damages from utility failure, weather, crime, or Property conditions. Tenant releases Landlord.');
-  pdf.moveDown();
-
-  sectionTitle('22', 'HOLDOVER');
-  paragraph(`If Tenant remains after expiration: ${money(doc.holdoverRent || (doc.monthlyRent ? doc.monthlyRent * 3 : 0))} per month until surrender.`);
-  pdf.moveDown();
-
-  sectionTitle('23', 'LANDLORD\'S LIEN');
-  paragraph('Per Texas Property Code 54.021. Certain items exempt.');
-  pdf.moveDown();
-
-  sectionTitle('24', 'SUBORDINATION');
-  paragraph('This lease subordinate to existing or future mortgages and liens.');
-  pdf.moveDown();
-
-  sectionTitle('25', 'CASUALTY LOSS');
-  paragraph('Per Texas Property Code 92.054 if Property becomes unfit.');
-  pdf.moveDown();
-
-  // Section 26: SPECIAL PROVISIONS
-  sectionTitle('26', 'SPECIAL PROVISIONS');
-  if (doc.specialProvisions) {
-    doc.specialProvisions.split('\n').filter(p => p.trim()).forEach((p, i) => {
-      paragraph(`${String.fromCharCode(97 + i)}. ${p.trim()}`);
-    });
-  } else {
-    paragraph('None.');
-  }
-  pdf.moveDown();
-
-  // Section 27-30: Legal condensed
-  sectionTitle('27', 'DEFAULT');
-  paragraph('Tenant default includes: nonpayment, abandonment, lease violations, false statements. Landlord may terminate, accelerate rent, sue for damages and attorney\'s fees. Interest at 18% on past-due amounts.');
-  pdf.moveDown();
-
-  sectionTitle('28', 'EARLY TERMINATION');
-  paragraph('Permitted for: military deployment (30 days notice), family violence (per Texas Property Code Ch. 92), sex offenses/stalking victims.');
-  pdf.moveDown();
-
-  sectionTitle('29', 'ATTORNEY\'S FEES');
-  paragraph('Prevailing party may recover reasonable attorney\'s fees.');
-  pdf.moveDown();
-
-  sectionTitle('30', 'REPRESENTATIONS');
-  paragraph('False statements by Tenant may result in lease termination.');
-  pdf.moveDown();
-
-  // Section 31: ADDENDA
-  sectionTitle('31', 'ADDENDA');
-  paragraph([
-    doc.addendumFlood ? '[X] Flood Disclosure' : '[ ] Flood Disclosure',
-    doc.addendumLeadPaint ? '[X] Lead-Based Paint' : '[ ] Lead-Based Paint',
-    doc.addendumInventory ? '[X] Inventory Form' : '[ ] Inventory Form',
-    doc.addendumPets ? '[X] Pet Agreement' : '[ ] Pet Agreement',
-  ].join('  '));
-  pdf.moveDown();
-
-  // Section 32: NOTICES
-  sectionTitle('32', 'NOTICES');
-  paragraph(`Landlord: ${field(doc.landlordName)}, ${field(doc.landlordAddress || doc.paymentAddress)}, ${field(doc.landlordEmail)}`);
-  paragraph(`Tenant: ${field(doc.propertyAddress)}, ${field(doc.tenantEmail)}`);
-  pdf.moveDown();
-
-  // Section 33: AGREEMENT
-  sectionTitle('33', 'AGREEMENT OF PARTIES');
-  paragraph('Entire agreement. Binding on heirs/successors. Joint and several liability. Texas law governs.');
-  pdf.moveDown();
-
-  // ===== SIGNATURE SECTION =====
-  resetX();
-  pdf.font('Helvetica-Bold').fontSize(12).text('EXECUTION', leftMargin, pdf.y, { width: textWidth, align: 'center' });
-  resetX();
-  pdf.font('Helvetica').fontSize(9).text('By signing, each party acknowledges this lease is binding and enforceable.', { width: textWidth, align: 'center' });
-  pdf.moveDown();
-  resetX();
-
-  // Landlord Signature
-  pdf.font('Helvetica-Bold').fontSize(10).text('LANDLORD:', { width: textWidth });
-  resetX();
-  if (doc.landlordSignature) {
-    try {
-      const imgData = doc.landlordSignature.replace(/^data:image\/\w+;base64,/, '');
-      pdf.image(Buffer.from(imgData, 'base64'), leftMargin, pdf.y, { width: 150, height: 45 });
-      pdf.y += 50;
-    } catch (e) {
-      pdf.font('Helvetica-Oblique').fontSize(9).text('[Electronic Signature on file]', { width: textWidth });
-    }
-    resetX();
-    pdf.font('Helvetica').fontSize(8);
-    paragraph(`Signed: ${doc.landlordName} on ${new Date(doc.landlordSignedAt).toLocaleString()} | IP: ${doc.landlordSignedIp}`);
-  } else {
-    paragraph('________________________________________     ________________');
-    paragraph('Signature                                                              Date');
-  }
-  paragraph(`Name: ${field(doc.landlordName)}`);
-  pdf.moveDown();
-
-  // Tenant Signature
-  resetX();
-  pdf.font('Helvetica-Bold').fontSize(10).text('TENANT:', { width: textWidth });
-  resetX();
-  if (doc.tenantSignature) {
-    try {
-      const imgData = doc.tenantSignature.replace(/^data:image\/\w+;base64,/, '');
-      pdf.image(Buffer.from(imgData, 'base64'), leftMargin, pdf.y, { width: 150, height: 45 });
-      pdf.y += 50;
-    } catch (e) {
-      pdf.font('Helvetica-Oblique').fontSize(9).text('[Electronic Signature on file]', { width: textWidth });
-    }
-    resetX();
-    pdf.font('Helvetica').fontSize(8);
-    paragraph(`Signed: ${doc.tenantName} on ${new Date(doc.tenantSignedAt).toLocaleString()} | IP: ${doc.tenantSignedIp}`);
-  } else {
-    paragraph('________________________________________     ________________');
-    paragraph('Signature                                                              Date');
-  }
-  paragraph(`Name: ${field(doc.tenantName)}`);
-
-  // Additional tenant signature blocks
-  for (const [i, t] of (doc.additionalTenants || []).entries()) {
-    pdf.moveDown();
-    resetX();
-    pdf.font('Helvetica-Bold').fontSize(10).text(`CO-TENANT ${i + 1}:`, { width: textWidth });
-    resetX();
-    if (t.signature) {
-      try {
-        const imgData = t.signature.replace(/^data:image\/\w+;base64,/, '');
-        pdf.image(Buffer.from(imgData, 'base64'), leftMargin, pdf.y, { width: 150, height: 45 });
-        pdf.y += 50;
-      } catch (e) {
-        pdf.font('Helvetica-Oblique').fontSize(9).text('[Electronic Signature on file]', { width: textWidth });
-      }
-      resetX();
-      pdf.font('Helvetica').fontSize(8);
-      paragraph(`Signed: ${t.name} on ${new Date(t.signedAt).toLocaleString()} | IP: ${t.signedIp}`);
-    } else {
-      paragraph('________________________________________     ________________');
-      paragraph('Signature                                                              Date');
-    }
-    paragraph(`Name: ${field(t.name)}`);
-  }
-
-  // E-Sign Certificate
-  pdf.moveDown();
-  resetX();
-  pdf.font('Helvetica-Bold').fontSize(10).text('CERTIFICATE OF ELECTRONIC SIGNING', leftMargin, pdf.y, { width: textWidth, align: 'center' });
-  resetX();
-  pdf.font('Helvetica').fontSize(8).fillColor('#444444');
-  pdf.text('This document was signed electronically via LeaseSign. Electronic signatures are legally binding under ESIGN Act and UETA.', { width: textWidth, align: 'center' });
-  pdf.moveDown();
-  resetX();
-  pdf.fillColor('#666666');
-  pdf.text(`Document ID: ${doc.id}`, { width: textWidth, align: 'center' });
-  resetX();
-  pdf.text(`Generated: ${new Date().toISOString()}`, { width: textWidth, align: 'center' });
-  resetX();
-  pdf.text(`Status: ${doc.status === 'completed' ? 'FULLY EXECUTED' : 'PENDING SIGNATURES'}`, { width: textWidth, align: 'center' });
-
-  addFooter();
-  pdf.end();
-}
-
-// ==================== EMAIL TEMPLATES ====================
-
-function generateSignEmail(doc, signerType, signUrl) {
-  const signerName = signerType === 'landlord' ? doc.landlordName : doc.tenantName;
-  const primaryColor = '#4f46e5';
-  const expiresDate = doc.linkExpiresAt ? new Date(doc.linkExpiresAt).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }) : null;
-
-  return `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
-<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f3f4f6;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="max-width: 600px; margin: 0 auto; padding: 20px;">
-    <tr>
-      <td style="background: linear-gradient(135deg, ${primaryColor} 0%, #818cf8 100%); padding: 40px 30px; text-align: center; border-radius: 12px 12px 0 0;">
-        <h1 style="color: white; margin: 0; font-size: 28px;">LeaseSign</h1>
-        <p style="color: rgba(255,255,255,0.9); margin: 10px 0 0;">Residential Lease Agreement</p>
-      </td>
-    </tr>
-    <tr>
-      <td style="background: white; padding: 40px 30px; border: 1px solid #e5e7eb; border-top: none;">
-        <h2 style="color: #111827; margin: 0 0 20px;">Hello ${signerName},</h2>
-        <p style="color: #4b5563; line-height: 1.6; margin: 0 0 20px;">
-          A residential lease agreement is ready for your electronic signature. Please review the document carefully before signing.
-        </p>
-
-        <table width="100%" style="background: #f9fafb; border-radius: 8px; padding: 20px; margin: 20px 0; border-left: 4px solid ${primaryColor};">
-          <tr><td style="padding: 8px 0;"><strong style="color: #374151;">Property:</strong> <span style="color: #6b7280;">${doc.propertyAddress || 'N/A'}</span></td></tr>
-          <tr><td style="padding: 8px 0;"><strong style="color: #374151;">Monthly Rent:</strong> <span style="color: #6b7280;">$${doc.monthlyRent?.toLocaleString() || 'N/A'}</span></td></tr>
-          <tr><td style="padding: 8px 0;"><strong style="color: #374151;">Lease Term:</strong> <span style="color: #6b7280;">${doc.commencementDate || 'N/A'} to ${doc.expirationDate || 'N/A'}</span></td></tr>
-        </table>
-
-        <table width="100%" cellpadding="0" cellspacing="0">
-          <tr>
-            <td style="text-align: center; padding: 20px 0;">
-              <a href="${signUrl}" style="display: inline-block; background: ${primaryColor}; color: white; padding: 16px 40px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px;">
-                Review & Sign Document
-              </a>
-            </td>
-          </tr>
-        </table>
-
-        ${expiresDate ? `
-        <div style="background: #fef3c7; border: 1px solid #fbbf24; border-radius: 8px; padding: 12px 16px; margin: 16px 0; text-align: center;">
-          <span style="color: #92400e; font-size: 14px;">This link expires on <strong>${expiresDate}</strong></span>
-        </div>
-        ` : ''}
-
-        <p style="color: #9ca3af; font-size: 13px; margin: 20px 0 0; padding-top: 20px; border-top: 1px solid #e5e7eb;">
-          This link is unique to you. Do not share this link with others.
-        </p>
-      </td>
-    </tr>
-    <tr>
-      <td style="background: #f9fafb; padding: 20px 30px; text-align: center; border-radius: 0 0 12px 12px; border: 1px solid #e5e7eb; border-top: none;">
-        <p style="color: #9ca3af; font-size: 12px; margin: 0;">
-          This is an automated message from LeaseSign.<br>
-          Questions? Contact your landlord or property manager.
-        </p>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>`;
-}
-
-// Generate PDF as buffer for email attachment (reuses generatePDFContent)
-function generatePDFBuffer(doc) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    const pdf = new PDFDocument({ size: 'LETTER', margins: { top: 50, bottom: 50, left: 60, right: 60 } });
-
-    pdf.on('data', chunk => chunks.push(chunk));
-    pdf.on('end', () => resolve(Buffer.concat(chunks)));
-    pdf.on('error', reject);
-
-    generatePDFContent(pdf, doc);
-  });
-}
-
-async function sendCompletionEmails(doc) {
-  // Generate PDF attachment
-  let pdfBuffer;
-  try {
-    pdfBuffer = await generatePDFBuffer(doc);
-  } catch (e) {
-    console.error('Failed to generate PDF for email:', e);
-  }
-
-  const html = `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-</head>
-<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f3f4f6;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="max-width: 600px; margin: 0 auto; padding: 20px;">
-    <tr>
-      <td style="background: linear-gradient(135deg, #10b981 0%, #34d399 100%); padding: 40px 30px; text-align: center; border-radius: 12px 12px 0 0;">
-        <h1 style="color: white; margin: 0; font-size: 28px;">Lease Signed Successfully!</h1>
-      </td>
-    </tr>
-    <tr>
-      <td style="background: white; padding: 40px 30px; border: 1px solid #e5e7eb; border-top: none;">
-        <p style="color: #4b5563; line-height: 1.6;">
-          Great news! The residential lease agreement has been fully executed by all parties.
-        </p>
-
-        <table width="100%" style="background: #f9fafb; border-radius: 8px; padding: 20px; margin: 20px 0; border-left: 4px solid #10b981;">
-          <tr><td style="padding: 8px 0;"><strong>Property:</strong> ${doc.propertyAddress}</td></tr>
-          <tr><td style="padding: 8px 0;"><strong>Landlord:</strong> ${doc.landlordName}</td></tr>
-          <tr><td style="padding: 8px 0;"><strong>Tenant:</strong> ${doc.tenantName}</td></tr>
-          <tr><td style="padding: 8px 0;"><strong>Completed:</strong> ${new Date().toLocaleDateString()}</td></tr>
-        </table>
-
-        <p style="color: #6b7280; font-size: 14px;">
-          ${pdfBuffer ? 'The signed lease agreement is attached to this email as a PDF.' : 'You can download a PDF copy from your LeaseSign dashboard.'}
-        </p>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>`;
-
-  const filename = `Signed_Lease_${(doc.propertyAddress || 'document').replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
-
-  const emailOptions = {
-    from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
-    subject: `Lease Completed: ${doc.propertyAddress}`,
-    html,
-    attachments: pdfBuffer ? [{
-      filename,
-      content: pdfBuffer,
-      contentType: 'application/pdf'
-    }] : []
-  };
-
-  const allRecipients = [
-    doc.landlordEmail,
-    doc.tenantEmail,
-    ...(doc.additionalTenants || []).map(t => t.email)
-  ].filter(Boolean);
-
-  await Promise.all(allRecipients.map(to => mailer.sendMail({ ...emailOptions, to })));
-}
-
-// ==================== AUDIT LOG ====================
-
-app.get('/api/documents/:id/audit', auth, async (req, res) => {
-  const docResult = await pool.query('SELECT * FROM documents WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
-  if (docResult.rows.length === 0) {
-    return res.status(404).json({ error: 'Document not found' });
-  }
-
-  const result = await pool.query(
-    'SELECT * FROM audit_logs WHERE document_id = $1 ORDER BY timestamp DESC',
-    [req.params.id]
-  );
-  res.json(result.rows);
-});
-
-// ==================== HEALTH & STATS ====================
-
-app.get('/api/health', async (req, res) => {
-  try {
-    await pool.query('SELECT 1');
+    
     res.json({
-      status: 'healthy',
-      database: 'connected',
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime(),
-      version: '1.0.0'
+      notifications: result.rows,
+      unreadCount: parseInt(unreadCount.rows[0].count),
     });
   } catch (err) {
-    res.status(500).json({
-      status: 'unhealthy',
-      database: 'disconnected',
-      error: err.message
-    });
+    res.status(500).json({ error: 'Failed to get notifications' });
   }
 });
 
-app.get('/api/stats', auth, async (req, res) => {
-  const result = await pool.query(
-    'SELECT * FROM documents WHERE user_id = $1 AND (is_template = FALSE OR is_template IS NULL)',
-    [req.user.id]
-  );
-  const userDocs = result.rows.map(docRowToObject);
-
-  const now = new Date();
-  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-  const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-
-  // Basic counts
-  const draft = userDocs.filter(d => d.status === 'draft').length;
-  const pending = userDocs.filter(d => d.status === 'pending').length;
-  const partial = userDocs.filter(d => d.status === 'partial').length;
-  const completed = userDocs.filter(d => d.status === 'completed').length;
-  const voided = userDocs.filter(d => d.status === 'voided').length;
-
-  // Completion rate
-  const sentDocs = userDocs.filter(d => d.status !== 'draft');
-  const completionRate = sentDocs.length > 0 ? Math.round((completed / sentDocs.length) * 100) : 0;
-
-  // Average time to complete (in hours)
-  const completedDocs = userDocs.filter(d => d.status === 'completed' && d.tenantSignedAt && d.createdAt);
-  let avgTimeToComplete = 0;
-  if (completedDocs.length > 0) {
-    const totalHours = completedDocs.reduce((sum, d) => {
-      const created = new Date(d.createdAt);
-      const signed = new Date(d.tenantSignedAt);
-      return sum + (signed - created) / (1000 * 60 * 60);
-    }, 0);
-    avgTimeToComplete = Math.round(totalHours / completedDocs.length);
+// Mark notification as read
+app.put('/api/notifications/:id/read', auth, async (req, res) => {
+  try {
+    await db.query(
+      'UPDATE notifications SET read_at = NOW() WHERE id = $1 AND user_id = $2',
+      [req.params.id, req.user.id]
+    );
+    res.json({ message: 'Notification marked as read' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to mark notification' });
   }
+});
 
-  // Monthly trends (last 6 months)
-  const monthlyTrends = [];
-  for (let i = 5; i >= 0; i--) {
-    const monthStart = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    const monthEnd = new Date(now.getFullYear(), now.getMonth() - i + 1, 0);
-    const monthName = monthStart.toLocaleString('en-US', { month: 'short' });
-    const created = userDocs.filter(d => {
-      const date = new Date(d.createdAt);
-      return date >= monthStart && date <= monthEnd;
-    }).length;
-    const signed = userDocs.filter(d => {
-      if (d.status !== 'completed') return false;
-      const date = new Date(d.tenantSignedAt || d.updatedAt);
-      return date >= monthStart && date <= monthEnd;
-    }).length;
-    monthlyTrends.push({ month: monthName, created, signed });
+// Mark all as read
+app.put('/api/notifications/read-all', auth, async (req, res) => {
+  try {
+    await db.query(
+      'UPDATE notifications SET read_at = NOW() WHERE user_id = $1 AND read_at IS NULL',
+      [req.user.id]
+    );
+    res.json({ message: 'All notifications marked as read' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to mark notifications' });
   }
+});
 
-  // Signing funnel
-  const totalSent = pending + partial + completed + voided;
-  const landlordSigned = partial + completed;
-  const fullySigned = completed;
+// ==================== ADMIN ROUTES ====================
 
-  // Recent activity
-  const recentActivity = userDocs
-    .filter(d => new Date(d.updatedAt) >= sevenDaysAgo)
-    .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
-    .slice(0, 5)
-    .map(d => ({
-      id: d.id,
-      title: d.title || d.propertyAddress,
-      status: d.status,
-      updatedAt: d.updatedAt
-    }));
+// Get platform stats
+app.get('/api/admin/stats', auth, requireRole('admin'), async (req, res) => {
+  try {
+    const [users, properties, leases, payments] = await Promise.all([
+      db.query('SELECT COUNT(*) FROM users'),
+      db.query('SELECT COUNT(*) FROM properties'),
+      db.query('SELECT COUNT(*), status FROM leases GROUP BY status'),
+      db.query('SELECT SUM(total_amount), COUNT(*) FROM payments WHERE status = \'completed\''),
+    ]);
+    
+    res.json({
+      totalUsers: parseInt(users.rows[0].count),
+      totalProperties: parseInt(properties.rows[0].count),
+      leasesByStatus: leases.rows,
+      totalRevenue: parseFloat(payments.rows[0].sum) || 0,
+      totalPayments: parseInt(payments.rows[0].count),
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to get stats' });
+  }
+});
 
-  res.json({
-    total: userDocs.length,
-    draft,
-    pending,
-    partial,
-    completed,
-    voided,
-    last30Days: userDocs.filter(d => new Date(d.createdAt) >= thirtyDaysAgo).length,
-    completedLast30Days: userDocs.filter(d => d.status === 'completed' && new Date(d.updatedAt) >= thirtyDaysAgo).length,
-    completionRate,
-    avgTimeToComplete,
-    monthlyTrends,
-    signingFunnel: { totalSent, landlordSigned, fullySigned },
-    recentActivity
+// Get audit logs
+app.get('/api/admin/audit-logs', auth, requireRole('admin'), async (req, res) => {
+  try {
+    const { page = 1, limit = 50, userId, action } = req.query;
+    const offset = (page - 1) * limit;
+    
+    let queryStr = `SELECT al.*, u.email FROM audit_logs al
+                   JOIN users u ON al.user_id = u.id
+                   WHERE 1=1`;
+    const params = [];
+    
+    if (userId) {
+      params.push(userId);
+      queryStr += ` AND al.user_id = $${params.length}`;
+    }
+    
+    if (action) {
+      params.push(action);
+      queryStr += ` AND al.action = $${params.length}`;
+    }
+    
+    queryStr += ` ORDER BY al.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(limit, offset);
+    
+    const result = await db.query(queryStr, params);
+    res.json({ logs: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to get audit logs' });
+  }
+});
+
+// ==================== WEBSOCKET ====================
+
+io.use(async (socket, next) => {
+  try {
+    const token = socket.handshake.auth.token;
+    if (!token) {
+      return next(new Error('No token'));
+    }
+    
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const result = await db.query(
+      'SELECT id, email, role FROM users WHERE id = $1',
+      [decoded.userId]
+    );
+    
+    if (!result.rows[0]) {
+      return next(new Error('User not found'));
+    }
+    
+    socket.user = result.rows[0];
+    next();
+  } catch (err) {
+    next(new Error('Authentication failed'));
+  }
+});
+
+io.on('connection', (socket) => {
+  logger.info('WebSocket connected', { userId: socket.user.id });
+  
+  socket.join(`user:${socket.user.id}`);
+  
+  socket.on('join:lease', (leaseId) => {
+    socket.join(`lease:${leaseId}`);
+  });
+  
+  socket.on('leave:lease', (leaseId) => {
+    socket.leave(`lease:${leaseId}`);
+  });
+  
+  socket.on('disconnect', () => {
+    logger.info('WebSocket disconnected', { userId: socket.user.id });
   });
 });
 
-// ==================== DOCUMENT ACTIONS ====================
+// ==================== ERROR HANDLING ====================
 
-app.post('/api/documents/:id/resend', auth, async (req, res) => {
-  try {
-    const docResult = await pool.query('SELECT * FROM documents WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
-    if (docResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Document not found' });
+app.use((err, req, res, next) => {
+  logger.error('Unhandled error', {
+    error: err.message,
+    stack: err.stack,
+    url: req.url,
+    method: req.method,
+  });
+  
+  if (err.name === 'MulterError') {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ error: 'File too large. Maximum size is 10MB.' });
     }
-
-    const doc = docRowToObject(docResult.rows[0]);
-
-    if (doc.status === 'completed' || doc.status === 'voided') {
-      return res.status(400).json({ error: 'Cannot resend completed or voided document' });
-    }
-
-    if (!doc.landlordSignedAt) {
-      const signUrl = `${APP_URL}/sign/${doc.landlordSignToken}`;
-      await mailer.sendMail({
-        from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
-        to: doc.landlordEmail,
-        subject: `[Reminder] Please Sign: Lease for ${doc.propertyAddress}`,
-        text: `Reminder: Please sign the lease agreement: ${signUrl}`,
-        html: generateReminderEmail(doc, 'landlord', signUrl)
-      });
-      await logAudit(doc.id, 'SIGNATURE_REMINDER_SENT', req.user.email, req, { to: doc.landlordEmail });
-      return res.json({ success: true, sentTo: doc.landlordEmail });
-    }
-
-    // Collect all unsigned tenants (primary + additional)
-    const unsigned = [];
-    if (!doc.tenantSignedAt)
-      unsigned.push({ email: doc.tenantEmail, signToken: doc.tenantSignToken, name: doc.tenantName });
-    for (const t of (doc.additionalTenants || [])) {
-      if (!t.signedAt) unsigned.push({ email: t.email, signToken: t.signToken, name: t.name });
-    }
-
-    if (unsigned.length === 0)
-      return res.status(400).json({ error: 'All signatures collected' });
-
-    for (const r of unsigned) {
-      const signUrl = `${APP_URL}/sign/${r.signToken}`;
-      await mailer.sendMail({
-        from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
-        to: r.email,
-        subject: `[Reminder] Please Sign: Lease for ${doc.propertyAddress}`,
-        text: `Reminder: Please sign the lease agreement: ${signUrl}`,
-        html: generateReminderEmail({ ...doc, tenantName: r.name }, 'tenant', signUrl)
-      });
-      await logAudit(doc.id, 'SIGNATURE_REMINDER_SENT', req.user.email, req, { to: r.email });
-    }
-    res.json({ success: true, sentTo: unsigned.map(r => r.email).join(', ') });
-  } catch (e) {
-    console.error('Resend error:', e);
-    res.status(500).json({ error: 'Failed to resend' });
+    return res.status(400).json({ error: err.message });
   }
+  
+  if (err.message === 'Not allowed by CORS') {
+    return res.status(403).json({ error: 'CORS policy violation' });
+  }
+  
+  res.status(500).json({
+    error: NODE_ENV === 'production' ? 'Internal server error' : err.message,
+  });
 });
 
-app.post('/api/documents/:id/duplicate', auth, async (req, res) => {
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ error: 'Route not found' });
+});
+
+// ==================== LEASE RENEWAL ROUTES ====================
+
+// Initiate lease renewal
+app.post('/api/leases/:id/renew', auth, requireRole('landlord', 'admin'), [
+  param('id').isUUID(),
+  body('newEndDate').isISO8601(),
+  body('newRentAmount').optional().isFloat({ min: 0 }),
+  body('renewalTerms').optional().isLength({ max: 5000 }),
+], async (req, res) => {
   try {
-    const docResult = await pool.query('SELECT * FROM documents WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
-    if (docResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Document not found' });
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
     }
-
-    const original = docRowToObject(docResult.rows[0]);
-    const originalData = { ...(docResult.rows[0].data || {}) };
-    if (Array.isArray(originalData.additionalTenants)) {
-      originalData.additionalTenants = originalData.additionalTenants.map(t => ({
-        name: t.name || '',
-        email: t.email || '',
-        phone: t.phone || '',
-        signToken: uuidv4(),
-        signature: null,
-        signedAt: null,
-        signedIp: null
-      }));
-    }
-
-    const result = await pool.query(
-      `INSERT INTO documents (user_id, status, title, data, landlord_sign_token, tenant_sign_token)
-       VALUES ($1, 'draft', $2, $3, $4, $5) RETURNING *`,
-      [req.user.id, `Copy of ${original.title || 'Lease'}`, JSON.stringify(originalData), uuidv4(), uuidv4()]
+    
+    const { newEndDate, newRentAmount, renewalTerms } = req.body;
+    
+    // Get original lease
+    const leaseResult = await db.query(
+      `SELECT l.*, p.address, p.county,
+              tenant.email as tenant_email, tenant.full_name as tenant_name
+       FROM leases l
+       JOIN properties p ON l.property_id = p.id
+       JOIN users tenant ON l.tenant_id = tenant.id
+       WHERE l.id = $1 AND l.landlord_id = $2`,
+      [req.params.id, req.user.id]
     );
-
-    const newDoc = docRowToObject(result.rows[0]);
-    await logAudit(newDoc.id, 'DOCUMENT_DUPLICATED', req.user.email, req, { fromId: original.id });
-    res.json(newDoc);
-  } catch (e) {
-    console.error('Duplicate error:', e);
-    res.status(500).json({ error: 'Failed to duplicate document' });
-  }
-});
-
-app.post('/api/documents/:id/void', auth, async (req, res) => {
-  try {
-    const docResult = await pool.query('SELECT * FROM documents WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
-    if (docResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Document not found' });
+    
+    if (!leaseResult.rows[0]) {
+      return res.status(404).json({ error: 'Lease not found' });
     }
-
-    const doc = docRowToObject(docResult.rows[0]);
-
-    if (doc.status === 'completed') {
-      return res.status(400).json({ error: 'Cannot void completed document' });
+    
+    const originalLease = leaseResult.rows[0];
+    
+    if (!['signed', 'active'].includes(originalLease.status)) {
+      return res.status(400).json({ error: 'Can only renew signed or active leases' });
     }
-
-    const result = await pool.query(
-      `UPDATE documents SET status = 'voided', voided_at = CURRENT_TIMESTAMP, void_reason = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *`,
-      [req.body.reason || 'Voided by user', req.params.id]
+    
+    const rentAmount = newRentAmount || originalLease.rent_amount;
+    const taxInfo = calculateTax(rentAmount, originalLease.county);
+    
+    // Create renewal lease
+    const renewalResult = await db.query(
+      `INSERT INTO leases (landlord_id, tenant_id, property_id, start_date, end_date,
+       rent_amount, security_deposit, tax_info, terms, special_clauses, status,
+       parent_lease_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'draft', $11, NOW())
+       RETURNING *`,
+      [
+        req.user.id, originalLease.tenant_id, originalLease.property_id,
+        originalLease.end_date, newEndDate, rentAmount,
+        originalLease.security_deposit, JSON.stringify(taxInfo),
+        sanitizeInput(renewalTerms) || originalLease.terms,
+        originalLease.special_clauses, req.params.id
+      ]
     );
-
-    await logAudit(doc.id, 'DOCUMENT_VOIDED', req.user.email, req, { reason: req.body.reason });
-    res.json(docRowToObject(result.rows[0]));
-  } catch (e) {
-    console.error('Void error:', e);
-    res.status(500).json({ error: 'Failed to void document' });
-  }
-});
-
-// ==================== TEMPLATES ====================
-
-app.post('/api/templates', auth, async (req, res) => {
-  try {
-    const { documentId, name } = req.body;
-
-    let templateData = req.body;
-
-    if (documentId) {
-      const docResult = await pool.query('SELECT * FROM documents WHERE id = $1 AND user_id = $2', [documentId, req.user.id]);
-      if (docResult.rows.length === 0) {
-        return res.status(404).json({ error: 'Document not found' });
-      }
-      templateData = { ...(docResult.rows[0].data || {}) };
-    }
-    // Clear party-specific info for template
-    templateData.tenantEmail = '';
-    templateData.tenantPhone = '';
-    if (Array.isArray(templateData.additionalTenants)) {
-      templateData.additionalTenants = templateData.additionalTenants.map(t => ({
-        name: t.name || '',
-        email: '',
-        phone: t.phone || '',
-        signToken: undefined,
-        signature: null,
-        signedAt: null,
-        signedIp: null
-      }));
-    }
-
-    const result = await pool.query(
-      `INSERT INTO documents (user_id, status, title, template_name, is_template, data, landlord_sign_token, tenant_sign_token)
-       VALUES ($1, 'template', $2, $2, TRUE, $3, $4, $5) RETURNING *`,
-      [req.user.id, name || 'Untitled Template', JSON.stringify(templateData), uuidv4(), uuidv4()]
+    
+    const renewal = renewalResult.rows[0];
+    
+    // Notify tenant
+    await sendEmail(
+      originalLease.tenant_email,
+      'Lease Renewal Offer',
+      `<p>Your landlord has offered a lease renewal for ${originalLease.address}. The new rent is $${rentAmount}/month. Please log in to review and sign.</p>`,
+      `Lease renewal offer for ${originalLease.address}. New rent: $${rentAmount}/month.`
     );
-
-    res.json(docRowToObject(result.rows[0]));
-  } catch (e) {
-    console.error('Template error:', e);
-    res.status(500).json({ error: 'Failed to save template' });
-  }
-});
-
-app.get('/api/templates', auth, async (req, res) => {
-  const result = await pool.query('SELECT * FROM documents WHERE user_id = $1 AND is_template = TRUE', [req.user.id]);
-  res.json(result.rows.map(docRowToObject));
-});
-
-app.post('/api/templates/:id/use', auth, async (req, res) => {
-  try {
-    const templateResult = await pool.query('SELECT * FROM documents WHERE id = $1 AND user_id = $2 AND is_template = TRUE', [req.params.id, req.user.id]);
-    if (templateResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Template not found' });
-    }
-
-    const template = templateResult.rows[0];
-    const templateData = template.data || {};
-    const overrideData = req.body;
-    const mergedData = { ...templateData, ...overrideData };
-    // Generate fresh sign tokens for additional tenants
-    const sourceTenants = overrideData.additionalTenants || templateData.additionalTenants || [];
-    mergedData.additionalTenants = sourceTenants.map(t => ({
-      name: t.name || '',
-      email: t.email || '',
-      phone: t.phone || '',
-      signToken: uuidv4(),
-      signature: null,
-      signedAt: null,
-      signedIp: null
-    }));
-
-    const result = await pool.query(
-      `INSERT INTO documents (user_id, status, title, data, landlord_sign_token, tenant_sign_token)
-       VALUES ($1, 'draft', $2, $3, $4, $5) RETURNING *`,
-      [req.user.id, overrideData.title || template.title, JSON.stringify(mergedData), uuidv4(), uuidv4()]
-    );
-
-    const newDoc = docRowToObject(result.rows[0]);
-    await logAudit(newDoc.id, 'DOCUMENT_CREATED_FROM_TEMPLATE', req.user.email, req, { templateId: template.id });
-    res.json(newDoc);
-  } catch (e) {
-    console.error('Use template error:', e);
-    res.status(500).json({ error: 'Failed to create from template' });
-  }
-});
-
-// ==================== BULK OPERATIONS ====================
-
-app.post('/api/documents/bulk-remind', auth, async (req, res) => {
-  try {
-    const { documentIds } = req.body;
-    if (!documentIds || !Array.isArray(documentIds)) {
-      return res.status(400).json({ error: 'Document IDs required' });
-    }
-
-    const results = [];
-    for (const id of documentIds) {
-      const docResult = await pool.query('SELECT * FROM documents WHERE id = $1 AND user_id = $2', [id, req.user.id]);
-      if (docResult.rows.length === 0) continue;
-
-      const doc = docRowToObject(docResult.rows[0]);
-      if (doc.status === 'completed' || doc.status === 'voided' || doc.status === 'draft') continue;
-
-      try {
-        if (!doc.landlordSignedAt) {
-          const signUrl = `${APP_URL}/sign/${doc.landlordSignToken}`;
-          await mailer.sendMail({
-            from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
-            to: doc.landlordEmail,
-            subject: `[Reminder] Please Sign: Lease for ${doc.propertyAddress}`,
-            text: `Reminder: Please sign the lease agreement: ${signUrl}`,
-            html: generateReminderEmail(doc, 'landlord', signUrl)
-          });
-          results.push({ id, success: true, sentTo: doc.landlordEmail });
-          await logAudit(doc.id, 'BULK_REMINDER_SENT', req.user.email, req, { to: doc.landlordEmail });
-        } else {
-          const unsigned = [];
-          if (!doc.tenantSignedAt)
-            unsigned.push({ email: doc.tenantEmail, signToken: doc.tenantSignToken, name: doc.tenantName });
-          for (const t of (doc.additionalTenants || [])) {
-            if (!t.signedAt) unsigned.push({ email: t.email, signToken: t.signToken, name: t.name });
-          }
-          for (const r of unsigned) {
-            const signUrl = `${APP_URL}/sign/${r.signToken}`;
-            await mailer.sendMail({
-              from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
-              to: r.email,
-              subject: `[Reminder] Please Sign: Lease for ${doc.propertyAddress}`,
-              text: `Reminder: Please sign the lease agreement: ${signUrl}`,
-              html: generateReminderEmail({ ...doc, tenantName: r.name }, 'tenant', signUrl)
-            });
-            await logAudit(doc.id, 'BULK_REMINDER_SENT', req.user.email, req, { to: r.email });
-          }
-          results.push({ id, success: true, sentTo: unsigned.map(r => r.email).join(', ') });
-        }
-      } catch (e) {
-        results.push({ id, success: false, error: e.message });
-      }
-    }
-
-    res.json({ results });
-  } catch (e) {
-    console.error('Bulk remind error:', e);
-    res.status(500).json({ error: 'Failed to send reminders' });
-  }
-});
-
-function generateReminderEmail(doc, signerType, signUrl) {
-  const signerName = signerType === 'landlord' ? doc.landlordName : doc.tenantName;
-
-  return `
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"></head>
-<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f3f4f6;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="max-width: 600px; margin: 0 auto; padding: 20px;">
-    <tr>
-      <td style="background: linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%); padding: 40px 30px; text-align: center; border-radius: 12px 12px 0 0;">
-        <h1 style="color: white; margin: 0; font-size: 28px;">Reminder</h1>
-        <p style="color: rgba(255,255,255,0.9); margin: 10px 0 0;">Your signature is still needed</p>
-      </td>
-    </tr>
-    <tr>
-      <td style="background: white; padding: 40px 30px; border: 1px solid #e5e7eb; border-top: none;">
-        <h2 style="color: #111827; margin: 0 0 20px;">Hello ${signerName},</h2>
-        <p style="color: #4b5563; line-height: 1.6;">
-          This is a friendly reminder that a residential lease agreement is waiting for your signature.
-        </p>
-
-        <table width="100%" style="background: #fef3c7; border-radius: 8px; padding: 20px; margin: 20px 0; border-left: 4px solid #f59e0b;">
-          <tr><td style="padding: 8px 0;"><strong>Property:</strong> ${doc.propertyAddress || 'N/A'}</td></tr>
-          <tr><td style="padding: 8px 0;"><strong>Monthly Rent:</strong> $${doc.monthlyRent?.toLocaleString() || 'N/A'}</td></tr>
-          <tr><td style="padding: 8px 0;"><strong>Lease Term:</strong> ${doc.commencementDate || 'N/A'} to ${doc.expirationDate || 'N/A'}</td></tr>
-        </table>
-
-        <table width="100%" cellpadding="0" cellspacing="0">
-          <tr>
-            <td style="text-align: center; padding: 20px 0;">
-              <a href="${signUrl}" style="display: inline-block; background: #f59e0b; color: white; padding: 16px 40px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px;">
-                Review & Sign Now
-              </a>
-            </td>
-          </tr>
-        </table>
-
-        <p style="color: #9ca3af; font-size: 13px; margin: 20px 0 0; padding-top: 20px; border-top: 1px solid #e5e7eb;">
-          If you have questions about this lease, please contact your landlord or property manager.
-        </p>
-      </td>
-    </tr>
-    <tr>
-      <td style="background: #f9fafb; padding: 20px 30px; text-align: center; border-radius: 0 0 12px 12px; border: 1px solid #e5e7eb; border-top: none;">
-        <p style="color: #9ca3af; font-size: 12px; margin: 0;">
-          This is an automated reminder from LeaseSign.
-        </p>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>`;
-}
-
-// ==================== REGENERATE LINK ====================
-
-app.post('/api/documents/:id/regenerate-link', auth, async (req, res) => {
-  try {
-    const docResult = await pool.query('SELECT * FROM documents WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
-    if (docResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Document not found' });
-    }
-
-    const doc = docRowToObject(docResult.rows[0]);
-
-    if (doc.status === 'completed' || doc.status === 'voided' || doc.status === 'draft') {
-      return res.status(400).json({ error: 'Cannot regenerate link for this document status' });
-    }
-
-    const linkExpiresAt = new Date(Date.now() + LINK_EXPIRATION_MS);
-    const result = await pool.query(
-      'UPDATE documents SET link_expires_at = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *',
-      [linkExpiresAt, req.params.id]
-    );
-    const updated = docRowToObject(result.rows[0]);
-
-    let recipient, signUrl, signerType;
-    if (!doc.landlordSignedAt) {
-      recipient = doc.landlordEmail;
-      signUrl = `${APP_URL}/sign/${doc.landlordSignToken}`;
-      signerType = 'landlord';
-    } else if (!doc.tenantSignedAt) {
-      recipient = doc.tenantEmail;
-      signUrl = `${APP_URL}/sign/${doc.tenantSignToken}`;
-      signerType = 'tenant';
-    }
-
-    if (recipient) {
-      await mailer.sendMail({
-        from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
-        to: recipient,
-        subject: `[New Link] Sign Lease for ${doc.propertyAddress}`,
-        text: `Your previous signing link has been renewed: ${signUrl}`,
-        html: generateSignEmail(updated, signerType, signUrl)
-      });
-    }
-
-    await logAudit(doc.id, 'LINK_REGENERATED', req.user.email, req, { to: recipient });
-    res.json({ success: true, linkExpiresAt, sentTo: recipient });
-  } catch (e) {
-    console.error('Regenerate link error:', e);
-    res.status(500).json({ error: 'Failed to regenerate link' });
-  }
-});
-
-// ==================== BULK DELETE ====================
-
-app.post('/api/documents/bulk-delete', auth, async (req, res) => {
-  try {
-    const { documentIds } = req.body;
-    if (!documentIds || !Array.isArray(documentIds)) {
-      return res.status(400).json({ error: 'Document IDs required' });
-    }
-
-    const results = [];
-    for (const id of documentIds) {
-      const docResult = await pool.query('SELECT * FROM documents WHERE id = $1 AND user_id = $2', [id, req.user.id]);
-      if (docResult.rows.length === 0) {
-        results.push({ id, success: false, error: 'Not found' });
-        continue;
-      }
-
-      const doc = docRowToObject(docResult.rows[0]);
-      if (doc.status !== 'draft') {
-        results.push({ id, success: false, error: 'Can only delete drafts' });
-        continue;
-      }
-
-      await pool.query('DELETE FROM documents WHERE id = $1', [id]);
-      results.push({ id, success: true });
-    }
-
-    res.json({ results, deletedCount: results.filter(r => r.success).length });
-  } catch (e) {
-    console.error('Bulk delete error:', e);
-    res.status(500).json({ error: 'Failed to delete documents' });
-  }
-});
-
-// ==================== NOTIFICATIONS ====================
-
-app.get('/api/notifications', auth, async (req, res) => {
-  const result = await pool.query(
-    'SELECT * FROM notifications WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 50',
-    [req.user.id]
-  );
-
-  const notifications = result.rows;
-  const unreadCount = notifications.filter(n => !n.read).length;
-  res.json({ notifications, unreadCount });
-});
-
-app.patch('/api/notifications/:id/read', auth, async (req, res) => {
-  const result = await pool.query(
-    'UPDATE notifications SET read = TRUE WHERE id = $1 AND user_id = $2 RETURNING *',
-    [req.params.id, req.user.id]
-  );
-
-  if (result.rows.length === 0) {
-    return res.status(404).json({ error: 'Notification not found' });
-  }
-
-  res.json(result.rows[0]);
-});
-
-app.post('/api/notifications/mark-all-read', auth, async (req, res) => {
-  const result = await pool.query(
-    'UPDATE notifications SET read = TRUE WHERE user_id = $1 AND read = FALSE',
-    [req.user.id]
-  );
-  res.json({ success: true, updated: result.rowCount });
-});
-
-// ==================== DECLINE SIGNING ====================
-
-app.post('/api/sign/:token/decline', async (req, res) => {
-  try {
-    const { reason } = req.body;
-
-    const result = await pool.query(
-      `SELECT * FROM documents
-       WHERE landlord_sign_token = $1
-          OR tenant_sign_token = $1
-          OR (jsonb_typeof(data->'additionalTenants') = 'array'
-              AND data->'additionalTenants' @> jsonb_build_array(jsonb_build_object('signToken', $1)))`,
-      [req.params.token]
-    );
-
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
-
-    const doc = docRowToObject(result.rows[0]);
-
-    if (doc.status === 'completed' || doc.status === 'voided' || doc.status === 'declined') {
-      return res.status(400).json({ error: 'Document cannot be declined in its current state' });
-    }
-
-    if (doc.linkExpiresAt && new Date(doc.linkExpiresAt) < new Date()) {
-      return res.status(410).json({ error: 'This signing link has expired.' });
-    }
-
-    let declinedBy;
-    if (doc.landlordSignToken === req.params.token) {
-      declinedBy = doc.landlordName || 'Landlord';
-    } else if (doc.tenantSignToken === req.params.token) {
-      declinedBy = doc.tenantName || 'Tenant';
-    } else {
-      const idx = (doc.additionalTenants || []).findIndex(t => t.signToken === req.params.token);
-      declinedBy = doc.additionalTenants?.[idx]?.name || 'Co-Tenant';
-    }
-
-    const rawData = result.rows[0].data || {};
-    const updatedData = { ...rawData, declinedBy, declineReason: reason || '', declinedAt: new Date().toISOString() };
-
-    await pool.query(
-      `UPDATE documents SET status = 'declined', data = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
-      [JSON.stringify(updatedData), doc.id]
-    );
-
-    await logAudit(doc.id, 'DOCUMENT_DECLINED', declinedBy, req, { reason });
-    await createNotification(doc.userId, 'declined', 'Document Declined',
-      `${declinedBy} declined to sign the lease for ${doc.propertyAddress}`, doc.id);
-
-    if (mailer) {
-      try {
-        await mailer.sendMail({
-          from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>',
-          to: doc.landlordEmail,
-          subject: `[Alert] Lease Declined: ${doc.propertyAddress}`,
-          html: `<p style="font-family:sans-serif"><strong>${declinedBy}</strong> has declined to sign the lease for <strong>${doc.propertyAddress}</strong>.</p>${reason ? `<p style="font-family:sans-serif">Reason provided: ${reason}</p>` : '<p style="font-family:sans-serif">No reason was provided.</p>'}`
-        });
-      } catch (e) { console.error('Decline notification email failed:', e.message); }
-    }
-
-    res.json({ success: true });
-  } catch (e) {
-    console.error('Decline error:', e);
-    res.status(500).json({ error: 'Failed to decline document' });
-  }
-});
-
-// ==================== CATCH-ALL ROUTE ====================
-
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, '../public/index.html'));
-});
-
-// ==================== RENEWAL BACKGROUND JOB ====================
-
-const sendRenewalNotice = async (doc, daysRemaining, threshold) => {
-  const rawResult = await pool.query('SELECT * FROM documents WHERE id = $1', [doc.id]);
-  if (rawResult.rows.length === 0) return;
-  const rawData = rawResult.rows[0].data || {};
-  const sentNotices = rawData.renewalNotices || [];
-
-  const alreadySent = sentNotices.some(n => n.threshold === threshold);
-  if (alreadySent) return;
-
-  const renewalRentAmount = rawData.renewalRentAmount || doc.monthlyRent;
-  const renewalTermMonths = rawData.renewalTermMonths || 12;
-
-  const noticeDays = Number(rawData.renewalNoticeDays || 60);
-  const isEarlyWarning = threshold > noticeDays;
-  const landlordUrl = `${APP_URL}`;
-  const subject = isEarlyWarning
-    ? `Early Renewal Heads-Up: ${doc.propertyAddress} — ${daysRemaining} days remaining`
-    : `Lease Renewal Notice: ${doc.propertyAddress} — ${daysRemaining} days remaining`;
-  const bodyHtml = (recipientRole) => `
-    <div style="font-family:sans-serif;max-width:600px;margin:0 auto">
-      <h2 style="color:${isEarlyWarning ? '#92400e' : '#1e40af'}">${isEarlyWarning ? '⚠️ Early Renewal Heads-Up' : 'Lease Renewal Notice'}</h2>
-      ${isEarlyWarning ? `<p style="background:#fffbeb;border:1px solid #fcd34d;padding:0.75rem;border-radius:6px;margin-bottom:1rem">Action required within the next <strong>${daysRemaining - noticeDays} days</strong> — your ${noticeDays}-day notice period begins soon.</p>` : ''}
-      <p>Your lease for <strong>${doc.propertyAddress}, ${doc.propertyCity}, TX ${doc.propertyZip}</strong> expires in <strong>${daysRemaining} days</strong>.</p>
-      <table style="width:100%;border-collapse:collapse;margin:1rem 0">
-        <tr><td style="padding:8px;border:1px solid #e5e7eb;background:#f9fafb"><strong>Current Rent</strong></td><td style="padding:8px;border:1px solid #e5e7eb">$${doc.monthlyRent}/month</td></tr>
-        <tr><td style="padding:8px;border:1px solid #e5e7eb;background:#f9fafb"><strong>Proposed Renewal Rent</strong></td><td style="padding:8px;border:1px solid #e5e7eb">$${renewalRentAmount}/month</td></tr>
-        <tr><td style="padding:8px;border:1px solid #e5e7eb;background:#f9fafb"><strong>Renewal Term</strong></td><td style="padding:8px;border:1px solid #e5e7eb">${renewalTermMonths} months</td></tr>
-        <tr><td style="padding:8px;border:1px solid #e5e7eb;background:#f9fafb"><strong>Lease Expires</strong></td><td style="padding:8px;border:1px solid #e5e7eb">${doc.leaseEndDate}</td></tr>
-      </table>
-      ${recipientRole === 'landlord' ? `<p><a href="${landlordUrl}" style="background:#1e40af;color:white;padding:10px 20px;border-radius:6px;text-decoration:none;display:inline-block;margin-top:0.5rem">Manage Renewal in LeaseSign</a></p>` : '<p>Please contact your landlord to discuss renewal terms.</p>'}
-      <hr style="border:none;border-top:1px solid #e5e7eb;margin:1.5rem 0"/>
-      <p style="color:#6b7280;font-size:0.875rem">LeaseSign — Automated Renewal Notice</p>
-    </div>`;
-
-  const allTenantEmails = [doc.tenantEmail, ...(doc.additionalTenants || []).map(t => t.email)].filter(Boolean);
-
-  if (mailer) {
-    try {
-      await mailer.sendMail({ from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>', to: doc.landlordEmail, subject, html: bodyHtml('landlord') });
-      for (const email of allTenantEmails) {
-        await mailer.sendMail({ from: process.env.SMTP_FROM || '"LeaseSign" <noreply@leasesign.com>', to: email, subject, html: bodyHtml('tenant') });
-      }
-    } catch (e) { console.error('[Renewal] Email failed:', e.message); }
-  }
-
-  await createNotification(doc.userId, 'renewal', 'Lease Renewal Notice',
-    `Lease for ${doc.propertyAddress} expires in ${daysRemaining} days. Renewal rent: $${renewalRentAmount}/mo.`, doc.id);
-
-  const updatedNotices = [...sentNotices, { threshold, daysRemaining, sentAt: new Date().toISOString() }];
-  await pool.query(
-    `UPDATE documents SET data = data || $1::jsonb, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
-    [JSON.stringify({ renewalNotices: updatedNotices }), doc.id]
-  );
-
-  await logAudit(doc.id, 'RENEWAL_NOTICE_SENT', 'system', null, { daysRemaining, threshold, to: [doc.landlordEmail, ...allTenantEmails] });
-  console.log(`[Renewal] Notice sent for doc ${doc.id} (${daysRemaining} days remaining)`);
-};
-
-const checkRenewals = async () => {
-  console.log('[Renewal] Running scheduled renewal check...');
-  try {
-    const result = await pool.query(`
-      SELECT * FROM documents
-      WHERE status = 'completed'
-        AND (data->>'autoRenew')::boolean = true
-        AND data->>'leaseEndDate' IS NOT NULL
-        AND data->>'renewedDocumentId' IS NULL
-    `);
-
-    const today = new Date();
-    for (const row of result.rows) {
-      const doc = docRowToObject(row);
-      if (!doc.leaseEndDate) continue;
-      const leaseEnd = new Date(doc.leaseEndDate);
-      const daysRemaining = Math.ceil((leaseEnd - today) / (1000 * 60 * 60 * 24));
-      if (daysRemaining <= 0) continue;
-
-      const noticeDays = Number(row.data?.renewalNoticeDays || 60);
-      // Three tiers: early warning (before the notice window opens), notice start, and mid-notice reminder
-      const thresholds = [noticeDays + 30, noticeDays, Math.round(noticeDays / 2)].filter(t => t > 0);
-      for (const threshold of thresholds) {
-        if (daysRemaining <= threshold) {
-          await sendRenewalNotice(doc, daysRemaining, threshold);
-        }
-      }
-    }
-    console.log(`[Renewal] Check complete. Processed ${result.rows.length} eligible document(s).`);
-  } catch (e) {
-    console.error('[Renewal] Check failed:', e.message);
-  }
-};
-
-// Run 30s after startup, then every 24 hours
-setTimeout(checkRenewals, 30000);
-setInterval(checkRenewals, 24 * 60 * 60 * 1000);
-
-// ==================== RENEWAL API ====================
-
-// Save renewal settings for a document
-app.put('/api/documents/:id/renewal', auth, async (req, res) => {
-  try {
-    const { autoRenew, renewalNoticeDays, renewalRentAmount, renewalTermMonths } = req.body;
-    const docResult = await pool.query('SELECT * FROM documents WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
-    if (docResult.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
-
-    const patch = {
-      autoRenew: !!autoRenew,
-      renewalNoticeDays: Number(renewalNoticeDays) || 60,
-      renewalRentAmount: renewalRentAmount ? Number(renewalRentAmount) : null,
-      renewalTermMonths: Number(renewalTermMonths) || 12
-    };
-
-    const updated = await pool.query(
-      `UPDATE documents SET data = data || $1::jsonb, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *`,
-      [JSON.stringify(patch), req.params.id]
-    );
-
-    await logAudit(req.params.id, 'RENEWAL_SETTINGS_UPDATED', req.user.email, req, patch);
-    res.json(docRowToObject(updated.rows[0]));
-  } catch (e) {
-    console.error('Renewal settings error:', e);
-    res.status(500).json({ error: 'Failed to save renewal settings' });
-  }
-});
-
-// Create a renewal draft document from a completed lease
-app.post('/api/documents/:id/renew', auth, async (req, res) => {
-  try {
-    const { renewalRentAmount, renewalTermMonths } = req.body;
-    const docResult = await pool.query('SELECT * FROM documents WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
-    if (docResult.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
-
-    const original = docRowToObject(docResult.rows[0]);
-    if (original.status !== 'completed') return res.status(400).json({ error: 'Only completed leases can be renewed' });
-
-    const termMonths = Number(renewalTermMonths) || Number(original.renewalTermMonths) || 12;
-    const newRent = renewalRentAmount ? Number(renewalRentAmount) : (original.renewalRentAmount || original.monthlyRent);
-
-    const oldEnd = original.leaseEndDate ? new Date(original.leaseEndDate) : new Date();
-    const newStart = new Date(oldEnd);
-    newStart.setDate(newStart.getDate() + 1);
-    const newEnd = new Date(newStart);
-    newEnd.setMonth(newEnd.getMonth() + termMonths);
-
-    const fmt = d => d.toISOString().split('T')[0];
-
-    const originalData = { ...(docResult.rows[0].data || {}) };
-    // Reset signing state for the new lease
-    delete originalData.landlordSignature;
-    delete originalData.tenantSignature;
-    delete originalData.declinedBy;
-    delete originalData.declineReason;
-    delete originalData.declinedAt;
-    delete originalData.renewedDocumentId;
-    delete originalData.renewalNotices;
-
-    if (Array.isArray(originalData.additionalTenants)) {
-      originalData.additionalTenants = originalData.additionalTenants.map(t => ({
-        name: t.name || '', email: t.email || '', phone: t.phone || '',
-        signToken: uuidv4(), signature: null, signedAt: null, signedIp: null
-      }));
-    }
-
-    originalData.monthlyRent = newRent;
-    originalData.leaseStartDate = fmt(newStart);
-    originalData.leaseEndDate = fmt(newEnd);
-    originalData.renewedFromId = original.id;
-
-    const result = await pool.query(
-      `INSERT INTO documents (user_id, status, title, data, landlord_sign_token, tenant_sign_token)
-       VALUES ($1, 'draft', $2, $3, $4, $5) RETURNING *`,
-      [req.user.id, `Renewal — ${original.propertyAddress || original.title || 'Lease'}`, JSON.stringify(originalData), uuidv4(), uuidv4()]
-    );
-
-    const newDoc = docRowToObject(result.rows[0]);
-
-    // Mark original doc as having a renewal pending
-    await pool.query(
-      `UPDATE documents SET data = data || $1::jsonb, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
-      [JSON.stringify({ renewedDocumentId: newDoc.id }), original.id]
-    );
-
-    await logAudit(newDoc.id, 'RENEWAL_CREATED', req.user.email, req, { fromId: original.id, newRent, termMonths });
-    res.json(newDoc);
+    
+    await logAuditEvent(req.user.id, 'CREATE_RENEWAL', 'lease', renewal.id, {
+      originalLeaseId: req.params.id,
+      newRentAmount: rentAmount,
+    });
+    
+    res.status(201).json(renewal);
   } catch (e) {
     console.error('Renew error:', e);
     res.status(500).json({ error: 'Failed to create renewal document' });
@@ -2365,14 +1920,77 @@ app.post('/api/documents/:id/renew', auth, async (req, res) => {
 
 // ==================== START SERVER ====================
 
+// ── HandyHub Integration ──────────────────────────────────────────────────────
+// Proxy routes that let LeaseSign UI call HandyHub's external API.
+// Set HANDYHUB_API_URL and HANDYHUB_API_KEY in .env to enable.
+
+const HANDYHUB_API_URL = process.env.HANDYHUB_API_URL || '';
+const HANDYHUB_API_KEY = process.env.HANDYHUB_API_KEY || '';
+
+async function handyhubRequest(path, opts = {}) {
+  if (!HANDYHUB_API_URL || !HANDYHUB_API_KEY) {
+    throw new Error('HandyHub integration not configured. Set HANDYHUB_API_URL and HANDYHUB_API_KEY in .env');
+  }
+  return fetch(`${HANDYHUB_API_URL}${path}`, {
+    ...opts,
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': HANDYHUB_API_KEY,
+      ...(opts.headers || {}),
+    },
+  });
+}
+
+// GET /api/handyhub/services — list available HandyHub services
+app.get('/api/handyhub/services', auth, async (req, res) => {
+  try {
+    const r = await handyhubRequest('/api/external/services');
+    const data = await r.json();
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(503).json({ error: e.message || 'HandyHub service unavailable' });
+  }
+});
+
+// POST /api/handyhub/bookings — create a maintenance booking via HandyHub
+app.post('/api/handyhub/bookings', auth, async (req, res) => {
+  try {
+    const r = await handyhubRequest('/api/external/bookings', {
+      method: 'POST',
+      body: JSON.stringify(req.body),
+    });
+    const data = await r.json();
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(503).json({ error: e.message || 'HandyHub service unavailable' });
+  }
+});
+
+// GET /api/handyhub/bookings — list bookings (filter by customerEmail or leaseDocumentId)
+app.get('/api/handyhub/bookings', auth, async (req, res) => {
+  try {
+    const params = new URLSearchParams();
+    if (req.query.customerEmail) params.set('customerEmail', req.query.customerEmail);
+    if (req.query.leaseDocumentId) params.set('leaseDocumentId', req.query.leaseDocumentId);
+    const r = await handyhubRequest(`/api/external/bookings?${params}`);
+    const data = await r.json();
+    res.status(r.status).json(data);
+  } catch (e) {
+    res.status(503).json({ error: e.message || 'HandyHub service unavailable' });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════════════════════════════╗
 ║                                                                ║
 ║   LeaseSign - Texas Residential Lease E-Signature Platform     ║
 ║                                                                ║
-║   Server running at: http://localhost:${PORT}                    ║
-║   Database: PostgreSQL                                         ║
+╠════════════════════════════════════════════════════════════════╣
+║                                                                ║
+║   Server running on port ${PORT}                                  ║
+║   Environment: ${NODE_ENV}                                    ║
+║   Frontend URL: ${FRONTEND_URL}             ║
 ║                                                                ║
 ╚════════════════════════════════════════════════════════════════╝
   `);
