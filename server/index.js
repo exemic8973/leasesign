@@ -57,14 +57,19 @@ setInterval(() => {
   for (const [ip, r] of loginAttempts.entries()) { if (now > r.resetAt) loginAttempts.delete(ip); }
 }, 60 * 60 * 1000);
 
+// Vercel serverless: use /tmp for writable storage
+const isVercel = process.env.VERCEL === '1';
+
 // Data storage paths (for uploads and generated files)
-const UPLOADS_DIR = path.join(__dirname, '../uploads');
-const GENERATED_DIR = path.join(__dirname, '../generated');
+const UPLOADS_DIR = isVercel ? '/tmp/uploads' : path.join(__dirname, '../uploads');
+const GENERATED_DIR = isVercel ? '/tmp/generated' : path.join(__dirname, '../generated');
 
 // Ensure directories exist
-[UPLOADS_DIR, GENERATED_DIR].forEach(dir => {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-});
+if (!isVercel) {
+  [UPLOADS_DIR, GENERATED_DIR].forEach(dir => {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  });
+}
 
 // PostgreSQL connection
 // SSL mode is controlled via DATABASE_URL (add ?sslmode=require or ?sslmode=no-verify)
@@ -176,7 +181,7 @@ async function initDatabase() {
 }
 
 // Initialize database on startup
-initDatabase();
+initDatabase().catch(err => console.error('DB init failed:', err.message));
 
 // Link expiration time (7 days in milliseconds)
 const LINK_EXPIRATION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -198,8 +203,13 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, '../public')));
 
-// Email transporter
-let mailer = null;
+// Email transporter — starts as a safe no-op wrapper to prevent crashes before async init completes
+let mailer = {
+  sendMail: async (opts) => {
+    console.warn(`Mailer not yet initialized; email not sent to: ${opts.to}`);
+    return null;
+  }
+};
 
 const createMailer = async () => {
   // Check if custom SMTP is configured
@@ -308,7 +318,11 @@ const createMailer = async () => {
 
 // Initialize mailer asynchronously
 (async () => {
-  mailer = await createMailer();
+  try {
+    mailer = await createMailer();
+  } catch (err) {
+    console.error('Mailer initialization failed:', err.message);
+  }
 })();
 
 // SMS Support (Twilio)
@@ -407,10 +421,19 @@ const logAudit = async (documentId, action, actor, req, details = null) => {
 
 app.post('/api/auth/register', async (req, res) => {
   try {
+    const ip = req.ip || req.connection?.remoteAddress || 'unknown';
+    if (checkLoginRateLimit(ip)) {
+      return res.status(429).json({ error: 'Too many attempts. Please try again in 15 minutes.' });
+    }
+
     const { email, password, name, company, phone } = req.body;
 
     if (!email || !password || !name) {
       return res.status(400).json({ error: 'Email, password, and name are required' });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
     }
 
     const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
@@ -824,6 +847,11 @@ app.get('/api/sign/:token', async (req, res) => {
 
   const doc = docRowToObject(result.rows[0]);
 
+  // Check if document is voided or declined
+  if (doc.status === 'voided' || doc.status === 'declined') {
+    return res.status(410).json({ error: 'This document has been voided or declined.', expired: true });
+  }
+
   // Check if link has expired
   if (doc.linkExpiresAt && new Date(doc.linkExpiresAt) < new Date()) {
     return res.status(410).json({ error: 'This signing link has expired. Please contact the sender to request a new link.', expired: true });
@@ -880,6 +908,11 @@ app.post('/api/sign/:token', async (req, res) => {
     const doc = docRowToObject(result.rows[0]);
     const rawData = result.rows[0].data || {};
 
+    // Check if document is voided or declined
+    if (doc.status === 'voided' || doc.status === 'declined') {
+      return res.status(410).json({ error: 'This document has been voided or declined.', expired: true });
+    }
+
     if (doc.linkExpiresAt && new Date(doc.linkExpiresAt) < new Date()) {
       return res.status(410).json({ error: 'This signing link has expired. Please contact the sender to request a new link.', expired: true });
     }
@@ -896,7 +929,7 @@ app.post('/api/sign/:token', async (req, res) => {
 
     const ip = req.ip || req.connection?.remoteAddress || 'unknown';
     const now = new Date();
-    let updateResult;
+    let updateResult = null;
 
     if (signerType === 'landlord') {
       const newExpiration = new Date(Date.now() + LINK_EXPIRATION_MS);
@@ -974,6 +1007,9 @@ app.post('/api/sign/:token', async (req, res) => {
       await createNotification(doc.userId, 'signed', 'Co-Tenant Signed', `${tenant.name} signed the lease for ${doc.propertyAddress}`, doc.id);
     }
 
+    if (!updateResult) {
+      return res.status(500).json({ error: 'Signing failed — internal error' });
+    }
     const updated = docRowToObject(updateResult.rows[0]);
 
     if (updated.status === 'completed') {
@@ -2265,9 +2301,11 @@ const checkRenewals = async () => {
   }
 };
 
-// Run 30s after startup, then every 24 hours
-setTimeout(checkRenewals, 30000);
-setInterval(checkRenewals, 24 * 60 * 60 * 1000);
+// Run 30s after startup, then every 24 hours (skip on Vercel serverless)
+if (!isVercel) {
+  setTimeout(checkRenewals, 30000);
+  setInterval(checkRenewals, 24 * 60 * 60 * 1000);
+}
 
 // ==================== RENEWAL API ====================
 
@@ -2365,8 +2403,10 @@ app.post('/api/documents/:id/renew', auth, async (req, res) => {
 
 // ==================== START SERVER ====================
 
-app.listen(PORT, () => {
-  console.log(`
+// Only listen when NOT on Vercel (Vercel invokes the exported app directly)
+if (!isVercel) {
+  app.listen(PORT, () => {
+    console.log(`
 ╔════════════════════════════════════════════════════════════════╗
 ║                                                                ║
 ║   LeaseSign - Texas Residential Lease E-Signature Platform     ║
@@ -2375,7 +2415,8 @@ app.listen(PORT, () => {
 ║   Database: PostgreSQL                                         ║
 ║                                                                ║
 ╚════════════════════════════════════════════════════════════════╝
-  `);
-});
+    `);
+  });
+}
 
 module.exports = app;
