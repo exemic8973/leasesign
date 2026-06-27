@@ -27,6 +27,11 @@ const nodemailer = require('nodemailer');
 const PDFDocument = require('pdfkit');
 const { Pool } = require('pg');
 
+const multer = require('multer');
+const pdfParse = require('pdf-parse');
+const zlib = require('zlib');
+const { createCanvas } = require('canvas');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'leasesign-secret-key-change-in-production-' + crypto.randomBytes(16).toString('hex');
@@ -65,8 +70,22 @@ const UPLOADS_DIR = isVercel ? '/tmp/uploads' : path.join(__dirname, '../uploads
 const GENERATED_DIR = isVercel ? '/tmp/generated' : path.join(__dirname, '../generated');
 
 // Ensure directories exist (on Vercel /tmp is the only writable path)
-[UPLOADS_DIR, GENERATED_DIR].forEach(dir => {
+const PDF_UPLOADS_DIR = path.join(UPLOADS_DIR, 'pdfs');
+[UPLOADS_DIR, GENERATED_DIR, PDF_UPLOADS_DIR].forEach(dir => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+});
+
+// Multer config for PDF uploads (max 25MB)
+const pdfUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, PDF_UPLOADS_DIR),
+    filename: (req, file, cb) => cb(null, `${uuidv4()}.pdf`)
+  }),
+  limits: { fileSize: 25 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'application/pdf') return cb(null, true);
+    cb(new Error('Only PDF files are allowed'));
+  }
 });
 
 // PostgreSQL connection
@@ -803,6 +822,491 @@ app.delete('/api/documents/:id', auth, async (req, res) => {
   res.json({ success: true });
 });
 
+// ==================== PDF IMPORT ====================
+
+// Convert raw RGB/Gray pixel data to PNG buffer with transparent background
+function rawToPng(rawData, width, height, channels) {
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext('2d');
+  const imageData = ctx.createImageData(width, height);
+  const pxCount = width * height;
+
+  for (let i = 0; i < pxCount; i++) {
+    const si = i * channels;
+    const di = i * 4;
+
+    // Determine brightness: for Gray, pixel value is the brightness; for RGB, use luminance
+    let brightness;
+    if (channels === 1) {
+      brightness = rawData[si];
+    } else {
+      brightness = rawData[si] * 0.299 + rawData[si + 1] * 0.587 + rawData[si + 2] * 0.114;
+    }
+
+    // PDFKit signature canvas: background=0 (black), strokes vary from 10-255
+    // Boost faint strokes: multiply by 5 for visibility, cap at 255
+    const alpha = brightness > 8 ? Math.min(255, brightness * 5) : 0;
+    imageData.data[di]     = 0;      // R = black
+    imageData.data[di + 1] = 0;      // G = black
+    imageData.data[di + 2] = 0;      // B = black
+    imageData.data[di + 3] = alpha;  // A = boosted brightness
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+  return canvas.toBuffer('image/png');
+}
+
+// Generate a visible signature image from a text name (fallback when binary extraction fails)
+function textSignatureToPng(name, width = 400, height = 150) {
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext('2d');
+
+  // Transparent background
+  ctx.clearRect(0, 0, width, height);
+
+  // Draw signature-like text
+  ctx.fillStyle = '#1a1a8a'; // dark blue ink
+  ctx.font = 'italic 36px \"Times New Roman\", \"Georgia\", serif';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+
+  // Add a slight wave/curve to simulate handwriting
+  ctx.save();
+  ctx.translate(width / 2, height / 2);
+  ctx.rotate(-0.02); // slight tilt
+  ctx.fillText(name, 0, 0);
+  ctx.restore();
+
+  // Add underline flourish
+  ctx.strokeStyle = '#1a1a8a';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  const textWidth = ctx.measureText(name).width;
+  const startX = (width - textWidth) / 2 + 20;
+  ctx.moveTo(startX, height / 2 + 24);
+  ctx.quadraticCurveTo(width / 2, height / 2 + 40, width - startX, height / 2 + 20);
+  ctx.stroke();
+
+  return canvas.toBuffer('image/png');
+}
+
+// Extract embedded signature images from PDF binary
+function extractSignatureImages(pdfPath) {
+  try {
+    const buf = fs.readFileSync(pdfPath);
+    const str = buf.toString('latin1');
+    const images = [];
+
+    // Find image XObjects by iterating obj...endobj blocks
+    const objRegex = /(\d+ \d+ obj)\s*(<<[\s\S]*?>>)\s*(?:stream\r?\n([\s\S]*?)endstream)?\s*endobj/g;
+    let match;
+
+    while ((match = objRegex.exec(str)) !== null) {
+      const dict = match[2];
+      const streamData = match[3];
+
+      // Must be an image XObject with a stream
+      if (!streamData) continue;
+      if (!dict.includes('/Subtype /Image')) continue;
+      if (!dict.includes('/Type /XObject')) continue;
+
+      const wMatch = dict.match(/\/Width\s+(\d+)/);
+      const hMatch = dict.match(/\/Height\s+(\d+)/);
+      const fMatch = dict.match(/\/Filter\s*\/(\w+)/);
+      const cMatch = dict.match(/\/ColorSpace\s*\/Device(\w+)/);
+
+      const width = wMatch ? parseInt(wMatch[1]) : 0;
+      const height = hMatch ? parseInt(hMatch[1]) : 0;
+      const filter = fMatch ? fMatch[1] : '';
+      const color = cMatch ? cMatch[1] : 'RGB';
+
+      // Signature images are typically 400x150 (PDFKit signature canvas)
+      if (width < 100 || height < 30) continue;
+
+      try {
+        let rawData;
+        if (filter === 'FlateDecode') {
+          rawData = zlib.inflateSync(Buffer.from(streamData, 'latin1'));
+        } else if (filter === 'DCTDecode') {
+          rawData = Buffer.from(streamData, 'latin1');
+        } else {
+          continue;
+        }
+
+        const channels = color === 'Gray' ? 1 : 3;
+
+        const pngBuf = rawToPng(rawData, width, height, channels);
+        const dataUri = `data:image/png;base64,${pngBuf.toString('base64')}`;
+
+        images.push({ width, height, color, dataUri });
+      } catch (e) {
+        // Ignore individual image failures
+      }
+    }
+
+    return images;
+  } catch (e) {
+    console.warn('Signature image extraction failed:', e.message);
+    return [];
+  }
+}
+
+// Extract lease fields from PDF text using regex patterns
+function extractLeaseData(text) {
+  const data = {};
+
+  // 1. PARTIES — Landlord & Tenant
+  const partiesMatch = text.match(/Landlord\):\s*(.+?);/);
+  if (partiesMatch) data.landlordName = partiesMatch[1].trim();
+
+  const tenantMatch = text.match(/Tenant"?\):\s*(.+?)\./);
+  if (tenantMatch) {
+    const tenants = tenantMatch[1].trim();
+    const names = tenants.split(/,\s*/);
+    data.tenantName = names[0] || '';
+    // Store additional tenants if more than one
+    if (names.length > 1) {
+      data.additionalTenants = names.slice(1).map(name => ({
+        name: name.trim(), email: '', phone: '',
+        signToken: null, signature: null, signedAt: null, signedIp: null
+      }));
+    }
+  }
+
+  // 2. PROPERTY
+  const addrMatch = text.match(/A\.\s*Address:\s*(.+?)(?:\n|$)/);
+  if (addrMatch) {
+    const fullAddr = addrMatch[1].trim();
+    data.propertyAddress = fullAddr;
+    // Try to parse city, state, zip
+    const cityMatch = fullAddr.match(/(.+),\s*(.+),\s*TX\s*(\d{5})/);
+    if (cityMatch) {
+      data.propertyAddress = cityMatch[1].trim();
+      data.propertyCity = cityMatch[2].trim();
+      data.propertyZip = cityMatch[3];
+    }
+  }
+
+  const countyMatch = text.match(/C\.\s*County:\s*(.+?)(?:\n|$)/);
+  if (countyMatch) data.propertyCounty = countyMatch[1].trim();
+
+  // 3. TERM — Dates
+  const commenceMatch = text.match(/Commencement Date:\s*(\d{4}-\d{2}-\d{2})/);
+  if (commenceMatch) data.commencementDate = commenceMatch[1];
+
+  const expireMatch = text.match(/Expiration Date:\s*(\d{4}-\d{2}-\d{2})/);
+  if (expireMatch) data.expirationDate = expireMatch[1];
+
+  // 4. RENEWAL — notice days
+  const noticeMatch = text.match(/at least\s*(\d+)\s*days before the Expiration Date/);
+  if (noticeMatch) data.terminationNoticeDays = noticeMatch[1];
+
+  // 5. RENT
+  const rentMatch = text.match(/Monthly Rent:\s*\$?([\d,]+\.?\d*)/);
+  if (rentMatch) data.monthlyRent = parseFloat(rentMatch[1].replace(/,/g, ''));
+
+  const proratedMatch = text.match(/Prorated Rent:\s*\$?([\d,]+\.?\d*)/);
+  if (proratedMatch) data.proratedRent = parseFloat(proratedMatch[1].replace(/,/g, ''));
+
+  // 6. LATE CHARGES
+  const lateMatch = text.match(/Initial late charge:\s*\$?([\d,]+\.?\d*)/);
+  if (lateMatch) data.initialLateFee = parseFloat(lateMatch[1].replace(/,/g, ''));
+
+  const dailyMatch = text.match(/Additional daily charge:\s*\$?([\d,]+\.?\d*)/);
+  if (dailyMatch) data.dailyLateFee = parseFloat(dailyMatch[1].replace(/,/g, ''));
+
+  // 7. RETURNED PAYMENTS
+  const returnedMatch = text.match(/Tenant will pay\s*\$?([\d,]+\.?\d*)\s*for each returned/);
+  if (returnedMatch) data.returnedPaymentFee = parseFloat(returnedMatch[1].replace(/,/g, ''));
+
+  // 9. ANIMALS
+  if (text.includes('[X] No animals permitted') || text.includes('[X] No animals')) {
+    data.petsAllowed = false;
+  } else {
+    const petsMatch = text.match(/Animals permitted:\s*(.+?)(?:\n|$)/);
+    if (petsMatch && petsMatch[1].trim()) {
+      data.petsAllowed = true;
+      data.allowedPets = petsMatch[1].trim();
+    }
+  }
+
+  const petFeeMatch = text.match(/Unauthorized animal fee:\s*\$?([\d,]+\.?\d*)/);
+  if (petFeeMatch) data.unauthorizedPetFee = parseFloat(petFeeMatch[1].replace(/,/g, ''));
+
+  // 10. SECURITY DEPOSIT
+  const depositMatch = text.match(/A\.\s*Amount:\s*\$?([\d,]+\.?\d*)/);
+  if (depositMatch) data.securityDeposit = parseFloat(depositMatch[1].replace(/,/g, ''));
+
+  // 11. UTILITIES
+  const utilMatch = text.match(/Tenant pays all utilities except:\s*(.+?)(?:\n|$)/);
+  if (utilMatch && utilMatch[1].trim() !== 'None') data.landlordPaysUtilities = utilMatch[1].trim();
+
+  // 12. HOA
+  const hoaMatch = text.match(/HOA:\s*(.+?)(?:\n|$)/);
+  if (hoaMatch && !hoaMatch[1].includes('Not subject')) data.hoaName = hoaMatch[1].trim();
+
+  // 14. ACCESS
+  const accessMatch = text.match(/Landlord may enter at reasonable times with\s*(\d+)\s*hours notice/);
+  if (accessMatch) data.accessNoticeHours = accessMatch[1];
+
+  // 17. SMOKING
+  if (text.includes('[X] NOT Permitted') && text.includes('Smoking:')) {
+    data.smokingAllowed = false;
+  } else if (text.includes('[X] Permitted') && text.includes('Smoking:')) {
+    data.smokingAllowed = true;
+  }
+
+  // 18. REPAIRS
+  const repairMatch = text.match(/Contact for repairs:\s*(.+?)\s+at\s+(\d+)/);
+  if (repairMatch) {
+    data.emergencyContact = repairMatch[1].trim();
+    data.landlordPhone = repairMatch[2].trim();
+  }
+
+  // 22. HOLDOVER
+  const holdoverMatch = text.match(/If Tenant remains after expiration:\s*\$?([\d,]+\.?\d*)/);
+  if (holdoverMatch) data.holdoverRent = parseFloat(holdoverMatch[1].replace(/,/g, ''));
+
+  // 26. SPECIAL PROVISIONS
+  const spMatch = text.match(/26\.\s*SPECIAL PROVISIONS\n([\s\S]*?)(?:27\.|$)/);
+  if (spMatch) {
+    const provisions = spMatch[1]
+      .split(/\n/)
+      .map(l => l.replace(/^[a-z]\.\s*/, '').trim())
+      .filter(l => l.length > 10);
+    if (provisions.length > 0) data.specialProvisions = provisions.join('\n');
+  }
+
+  // 32. NOTICES — extract landlord & tenant emails
+  const noticeSection = text.match(/32\.\s*NOTICES?\n([\s\S]*?)(?:33\.|$)/);
+  if (noticeSection) {
+    const landlordNotice = noticeSection[1].match(/Landlord:\s*(.+)/);
+    if (landlordNotice) {
+      const parts = landlordNotice[1].split(/,\s*/);
+      const emailPart = parts.find(p => p.includes('@'));
+      if (emailPart) data.landlordEmail = emailPart.trim();
+      // Extract landlord address from notices
+      if (parts.length >= 3) {
+        const addrParts = parts.filter(p => !p.includes('@')).join(', ').trim();
+        if (addrParts && !data.landlordAddress) data.landlordAddress = addrParts;
+      }
+    }
+    const tenantNotice = noticeSection[1].match(/Tenant:\s*(.+)/);
+    if (tenantNotice) {
+      const tParts = tenantNotice[1].split(/,\s*/);
+      const tEmail = tParts.find(p => p.includes('@'));
+      if (tEmail) data.tenantEmail = tEmail.trim();
+    }
+  }
+
+  // EXECUTION — extract signatures, dates, and status
+  const execSection = text.match(/EXECUTION\n([\s\S]*)/);
+  if (execSection) {
+    const execText = execSection[1];
+
+    // Landlord signature
+    const llSig = execText.match(/LANDLORD:\s*\n?\s*Signed:\s*(.+?)\s+on\s+([\d/]+,\s*[\d:APM\s]+?)\s*\|\s*IP:\s*(\S+)/);
+    if (llSig) {
+      data.landlordSignature = llSig[1].trim();
+      data.landlordSignedAt = new Date(llSig[2]).toISOString();
+      data.landlordSignedIp = llSig[3].trim();
+    }
+
+    // Tenant signature
+    const tSig = execText.match(/TENANT:\s*\n?\s*Signed:\s*(.+?)\s+on\s+([\d/]+,\s*[\d:APM\s]+?)\s*\|\s*IP:\s*(\S+)/);
+    if (tSig) {
+      data.tenantSignature = tSig[1].trim();
+      data.tenantSignedAt = new Date(tSig[2]).toISOString();
+      data.tenantSignedIp = tSig[3].trim();
+    }
+
+    // Co-tenant signatures — look for CO-TENANT N blocks
+    const coSigRegex = /CO-TENANT\s*\d+\s*:\s*\n?\s*Signed:\s*(.+?)\s+on\s+([\d/]+,\s*[\d:APM\s]+?)\s*\|\s*IP:\s*(\S+)/g;
+    let coMatch;
+    const coSignatures = [];
+    while ((coMatch = coSigRegex.exec(execText)) !== null) {
+      coSignatures.push({
+        name: coMatch[1].trim(),
+        signedAt: new Date(coMatch[2]).toISOString(),
+        signedIp: coMatch[3].trim()
+      });
+    }
+    // Merge co-tenant signatures into additionalTenants
+    if (coSignatures.length > 0 && data.additionalTenants) {
+      data.additionalTenants = data.additionalTenants.map((t, i) => ({
+        ...t,
+        ...(coSignatures[i] || {}),
+        signature: coSignatures[i]?.name || t.signature
+      }));
+    }
+
+    // Document ID from certificate
+    const docIdMatch = execText.match(/Document ID:\s*([a-f0-9-]+)/);
+    if (docIdMatch) data._originalDocumentId = docIdMatch[1];
+
+    // Status
+    if (execText.includes('FULLY EXECUTED')) {
+      data.status = 'completed';
+    } else if (data.landlordSignature && data.tenantSignature) {
+      data.status = 'completed';
+    } else if (data.landlordSignature || data.tenantSignature) {
+      data.status = 'partial';
+    }
+  }
+
+  // Fallback: derive title from address if no title provided
+  if (data.propertyAddress) {
+    data._suggestedTitle = data.propertyAddress;
+  }
+
+  return data;
+}
+
+// Import an existing lease PDF — extracts text and auto-fills lease fields
+app.post('/api/documents/import-pdf', auth, pdfUpload.single('pdf'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'PDF file is required' });
+    }
+
+    const storedPath = req.file.path;
+    const filename = req.file.originalname || 'imported-lease.pdf';
+
+    // Derive a title from the filename
+    const title = req.body.title || filename.replace(/\.pdf$/i, '').replace(/[-_]/g, ' ');
+
+    // Extract text from the uploaded PDF and parse lease fields
+    let extractedData = {};
+    try {
+      const pdfBuffer = fs.readFileSync(storedPath);
+      const pdfData = await pdfParse(pdfBuffer);
+      console.log(`PDF parsed: ${pdfData.numpages} pages, ${pdfData.text.length} chars`);
+      extractedData = extractLeaseData(pdfData.text);
+      console.log('Extracted fields:', Object.keys(extractedData).filter(k => !k.startsWith('_')).join(', '));
+    } catch (parseErr) {
+      console.warn('PDF text extraction failed (non-critical):', parseErr.message);
+    }
+
+    // Extract embedded signature images from PDF (overrides text-extracted names)
+    try {
+      const sigImages = extractSignatureImages(storedPath);
+      console.log(`Found ${sigImages.length} embedded signature image(s)`);
+      // Helper: check if an extracted signature image has actual content (>500 bytes base64 = visible strokes)
+      const hasContent = (dataUri) => {
+        if (!dataUri) return false;
+        const b64 = dataUri.replace(/^data:image\/png;base64,/, '');
+        return b64.length > 500;
+      };
+
+      // Signature images come in pairs (Gray + RGB). Use the RGB versions (even indices).
+      if (sigImages.length >= 2 && hasContent(sigImages[1].dataUri)) {
+        extractedData.landlordSignature = sigImages[1].dataUri;
+      } else if (sigImages.length >= 1 && hasContent(sigImages[0].dataUri)) {
+        extractedData.landlordSignature = sigImages[0].dataUri;
+      }
+      if (sigImages.length >= 4 && hasContent(sigImages[3].dataUri)) {
+        extractedData.tenantSignature = sigImages[3].dataUri;
+      } else if (sigImages.length >= 3 && hasContent(sigImages[2].dataUri)) {
+        extractedData.tenantSignature = sigImages[2].dataUri;
+      }
+      // Co-tenant signatures
+      if (sigImages.length >= 6 && extractedData.additionalTenants) {
+        let imgIdx = 5;
+        for (const t of extractedData.additionalTenants) {
+          if (imgIdx < sigImages.length && hasContent(sigImages[imgIdx].dataUri)) {
+            t.signature = sigImages[imgIdx].dataUri;
+            imgIdx += 2;
+          }
+        }
+      }
+
+      // Fallback: generate text-based signature images when binary extraction yields nothing visible
+      const llName = extractedData.landlordName || 'Landlord';
+      const tName = extractedData.tenantName || 'Tenant';
+      if (!extractedData.landlordSignature || !hasContent(extractedData.landlordSignature)) {
+        const buf = textSignatureToPng(llName);
+        extractedData.landlordSignature = `data:image/png;base64,${buf.toString('base64')}`;
+      }
+      if (!extractedData.tenantSignature || !hasContent(extractedData.tenantSignature)) {
+        const buf = textSignatureToPng(tName);
+        extractedData.tenantSignature = `data:image/png;base64,${buf.toString('base64')}`;
+      }
+      if (extractedData.additionalTenants) {
+        for (const t of extractedData.additionalTenants) {
+          if (!t.signature || !hasContent(t.signature)) {
+            const buf = textSignatureToPng(t.name || 'Co-Tenant');
+            t.signature = `data:image/png;base64,${buf.toString('base64')}`;
+          }
+        }
+      }
+    } catch (sigErr) {
+      console.warn('Signature image extraction failed (non-critical):', sigErr.message);
+    }
+
+    const docData = {
+      uploadedPdf: storedPath,
+      uploadedPdfName: filename,
+      importedAt: new Date().toISOString(),
+      ...extractedData
+    };
+
+    // Determine status from extraction (defaults to 'draft' if not found)
+    const docStatus = extractedData.status || 'draft';
+    delete docData.status; // handled via column, not data JSON
+
+    // Use address-based title if no explicit title and address was extracted
+    const finalTitle = title || extractedData._suggestedTitle || 'Imported Lease';
+    delete docData._suggestedTitle;
+    delete docData._originalDocumentId; // internal reference only
+
+    // For completed docs, set signature columns directly
+    const llSig = extractedData.landlordSignature || null;
+    const llDate = extractedData.landlordSignedAt || null;
+    const llIp = extractedData.landlordSignedIp || null;
+    const tSig = extractedData.tenantSignature || null;
+    const tDate = extractedData.tenantSignedAt || null;
+    const tIp = extractedData.tenantSignedIp || null;
+
+    const result = await pool.query(
+      `INSERT INTO documents (user_id, status, title, data,
+        landlord_sign_token, tenant_sign_token,
+        landlord_signature, landlord_signed_at, landlord_signed_ip,
+        tenant_signature, tenant_signed_at, tenant_signed_ip)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+      [req.user.id, docStatus, finalTitle, JSON.stringify(docData),
+       uuidv4(), uuidv4(),
+       llSig, llDate, llIp,
+       tSig, tDate, tIp]
+    );
+
+    const doc = docRowToObject(result.rows[0]);
+    await logAudit(doc.id, 'PDF_IMPORTED', req.user.email, req, { filename, extractedFields: Object.keys(extractedData).filter(k => !k.startsWith('_')) });
+    res.json(doc);
+  } catch (e) {
+    console.error('PDF import error:', e);
+    res.status(500).json({ error: e.message || 'Failed to import PDF' });
+  }
+});
+
+// Serve the uploaded PDF for a document
+app.get('/api/documents/:id/uploaded-pdf', auth, async (req, res) => {
+  const result = await pool.query('SELECT * FROM documents WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
+  if (result.rows.length === 0) {
+    return res.status(404).json({ error: 'Document not found' });
+  }
+
+  const doc = docRowToObject(result.rows[0]);
+  const pdfPath = doc.uploadedPdf;
+
+  if (!pdfPath || !fs.existsSync(pdfPath)) {
+    return res.status(404).json({ error: 'No uploaded PDF found for this document' });
+  }
+
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `inline; filename="${doc.uploadedPdfName || 'lease.pdf'}"`);
+  fs.createReadStream(pdfPath).pipe(res);
+});
+
 // ==================== SIGNATURE WORKFLOW ====================
 
 app.post('/api/documents/:id/send', auth, async (req, res) => {
@@ -1353,20 +1857,32 @@ function generatePDFContent(pdf, doc) {
   pdf.moveDown();
   resetX();
 
+  // Signature helper: render as image (base64) or cursive text
+  const renderSignature = (sigValue, name) => {
+    if (!sigValue) return false;
+    if (sigValue.startsWith('data:image/')) {
+      try {
+        const imgData = sigValue.replace(/^data:image\/\w+;base64,/, '');
+        pdf.image(Buffer.from(imgData, 'base64'), leftMargin, pdf.y, { width: 150, height: 45 });
+        pdf.y += 50;
+        return true;
+      } catch (e) { /* fall through to text */ }
+    }
+    // Text-based signature — render in cursive
+    pdf.font('Times-Italic').fontSize(22).fillColor('#1e40af');
+    pdf.text(sigValue, leftMargin, pdf.y, { width: textWidth });
+    pdf.fillColor('#000000');
+    pdf.moveDown(0.5);
+    return true;
+  };
+
   // Landlord Signature
   pdf.font('Helvetica-Bold').fontSize(10).text('LANDLORD:', { width: textWidth });
   resetX();
-  if (doc.landlordSignature) {
-    try {
-      const imgData = doc.landlordSignature.replace(/^data:image\/\w+;base64,/, '');
-      pdf.image(Buffer.from(imgData, 'base64'), leftMargin, pdf.y, { width: 150, height: 45 });
-      pdf.y += 50;
-    } catch (e) {
-      pdf.font('Helvetica-Oblique').fontSize(9).text('[Electronic Signature on file]', { width: textWidth });
-    }
+  if (renderSignature(doc.landlordSignature, doc.landlordName)) {
     resetX();
     pdf.font('Helvetica').fontSize(8);
-    paragraph(`Signed: ${doc.landlordName} on ${new Date(doc.landlordSignedAt).toLocaleString()} | IP: ${doc.landlordSignedIp}`);
+    paragraph(`Signed: ${doc.landlordName} on ${doc.landlordSignedAt ? new Date(doc.landlordSignedAt).toLocaleString() : 'N/A'} | IP: ${doc.landlordSignedIp || 'N/A'}`);
   } else {
     paragraph('________________________________________     ________________');
     paragraph('Signature                                                              Date');
@@ -1378,17 +1894,10 @@ function generatePDFContent(pdf, doc) {
   resetX();
   pdf.font('Helvetica-Bold').fontSize(10).text('TENANT:', { width: textWidth });
   resetX();
-  if (doc.tenantSignature) {
-    try {
-      const imgData = doc.tenantSignature.replace(/^data:image\/\w+;base64,/, '');
-      pdf.image(Buffer.from(imgData, 'base64'), leftMargin, pdf.y, { width: 150, height: 45 });
-      pdf.y += 50;
-    } catch (e) {
-      pdf.font('Helvetica-Oblique').fontSize(9).text('[Electronic Signature on file]', { width: textWidth });
-    }
+  if (renderSignature(doc.tenantSignature, doc.tenantName)) {
     resetX();
     pdf.font('Helvetica').fontSize(8);
-    paragraph(`Signed: ${doc.tenantName} on ${new Date(doc.tenantSignedAt).toLocaleString()} | IP: ${doc.tenantSignedIp}`);
+    paragraph(`Signed: ${doc.tenantName} on ${doc.tenantSignedAt ? new Date(doc.tenantSignedAt).toLocaleString() : 'N/A'} | IP: ${doc.tenantSignedIp || 'N/A'}`);
   } else {
     paragraph('________________________________________     ________________');
     paragraph('Signature                                                              Date');
@@ -1401,17 +1910,10 @@ function generatePDFContent(pdf, doc) {
     resetX();
     pdf.font('Helvetica-Bold').fontSize(10).text(`CO-TENANT ${i + 1}:`, { width: textWidth });
     resetX();
-    if (t.signature) {
-      try {
-        const imgData = t.signature.replace(/^data:image\/\w+;base64,/, '');
-        pdf.image(Buffer.from(imgData, 'base64'), leftMargin, pdf.y, { width: 150, height: 45 });
-        pdf.y += 50;
-      } catch (e) {
-        pdf.font('Helvetica-Oblique').fontSize(9).text('[Electronic Signature on file]', { width: textWidth });
-      }
+    if (renderSignature(t.signature, t.name)) {
       resetX();
       pdf.font('Helvetica').fontSize(8);
-      paragraph(`Signed: ${t.name} on ${new Date(t.signedAt).toLocaleString()} | IP: ${t.signedIp}`);
+      paragraph(`Signed: ${t.name} on ${t.signedAt ? new Date(t.signedAt).toLocaleString() : 'N/A'} | IP: ${t.signedIp || 'N/A'}`);
     } else {
       paragraph('________________________________________     ________________');
       paragraph('Signature                                                              Date');
