@@ -64,12 +64,10 @@ const isVercel = process.env.VERCEL === '1';
 const UPLOADS_DIR = isVercel ? '/tmp/uploads' : path.join(__dirname, '../uploads');
 const GENERATED_DIR = isVercel ? '/tmp/generated' : path.join(__dirname, '../generated');
 
-// Ensure directories exist
-if (!isVercel) {
-  [UPLOADS_DIR, GENERATED_DIR].forEach(dir => {
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  });
-}
+// Ensure directories exist (on Vercel /tmp is the only writable path)
+[UPLOADS_DIR, GENERATED_DIR].forEach(dir => {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+});
 
 // PostgreSQL connection
 // SSL mode is controlled via DATABASE_URL (add ?sslmode=require or ?sslmode=no-verify)
@@ -180,8 +178,18 @@ async function initDatabase() {
   }
 }
 
-// Initialize database on startup
-initDatabase().catch(err => console.error('DB init failed:', err.message));
+// Lazy DB initialization — first request awaits table creation (critical for serverless cold starts)
+let dbReady = null;
+const ensureDb = async () => {
+  if (!dbReady) {
+    dbReady = initDatabase().catch(err => {
+      console.error('Database initialization error:', err);
+      dbReady = null; // allow retry on next request
+      throw err;
+    });
+  }
+  return dbReady;
+};
 
 // Link expiration time (7 days in milliseconds)
 const LINK_EXPIRATION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -199,6 +207,14 @@ const createNotification = async (userId, type, title, message, documentId = nul
 };
 
 // Middleware
+app.use(async (req, res, next) => {
+  try {
+    await ensureDb();
+    next();
+  } catch (e) {
+    res.status(500).json({ error: 'Database unavailable', details: e.message });
+  }
+});
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, '../public')));
