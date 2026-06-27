@@ -30,7 +30,7 @@ const { Pool } = require('pg');
 const multer = require('multer');
 const pdfParse = require('pdf-parse');
 const zlib = require('zlib');
-const { createCanvas } = require('canvas');
+const { PNG } = require('pngjs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -824,18 +824,15 @@ app.delete('/api/documents/:id', auth, async (req, res) => {
 
 // ==================== PDF IMPORT ====================
 
-// Convert raw RGB/Gray pixel data to PNG buffer with transparent background
+// Convert raw RGB/Gray pixel data to PNG buffer with transparent background (pure JS, works on Vercel)
 function rawToPng(rawData, width, height, channels) {
-  const canvas = createCanvas(width, height);
-  const ctx = canvas.getContext('2d');
-  const imageData = ctx.createImageData(width, height);
+  const png = new PNG({ width, height, colorType: 6 }); // RGBA
   const pxCount = width * height;
 
   for (let i = 0; i < pxCount; i++) {
     const si = i * channels;
     const di = i * 4;
 
-    // Determine brightness: for Gray, pixel value is the brightness; for RGB, use luminance
     let brightness;
     if (channels === 1) {
       brightness = rawData[si];
@@ -843,51 +840,125 @@ function rawToPng(rawData, width, height, channels) {
       brightness = rawData[si] * 0.299 + rawData[si + 1] * 0.587 + rawData[si + 2] * 0.114;
     }
 
-    // PDFKit signature canvas: background=0 (black), strokes vary from 10-255
+    // PDFKit signature canvas: background=0, strokes vary from 10-255
     // Boost faint strokes: multiply by 5 for visibility, cap at 255
     const alpha = brightness > 8 ? Math.min(255, brightness * 5) : 0;
-    imageData.data[di]     = 0;      // R = black
-    imageData.data[di + 1] = 0;      // G = black
-    imageData.data[di + 2] = 0;      // B = black
-    imageData.data[di + 3] = alpha;  // A = boosted brightness
+    png.data[di]     = 0;      // R
+    png.data[di + 1] = 0;      // G
+    png.data[di + 2] = 0;      // B
+    png.data[di + 3] = alpha;  // A
   }
 
-  ctx.putImageData(imageData, 0, 0);
-  return canvas.toBuffer('image/png');
+  return PNG.sync.write(png);
 }
 
-// Generate a visible signature image from a text name (fallback when binary extraction fails)
+// Generate a visible signature image from a text name (pure JS fallback, works on Vercel)
 function textSignatureToPng(name, width = 400, height = 150) {
-  const canvas = createCanvas(width, height);
-  const ctx = canvas.getContext('2d');
+  const png = new PNG({ width, height, colorType: 6 });
+  const pxCount = width * height;
 
-  // Transparent background
-  ctx.clearRect(0, 0, width, height);
+  // Simple text rendering: draw name centered with basic pixel art
+  const chars = name.split('');
+  const charWidth = 14;
+  const charHeight = 24;
+  const startX = Math.max(10, (width - chars.length * charWidth) / 2);
+  const startY = (height - charHeight) / 2;
 
-  // Draw signature-like text
-  ctx.fillStyle = '#1a1a8a'; // dark blue ink
-  ctx.font = 'italic 36px \"Times New Roman\", \"Georgia\", serif';
-  ctx.textBaseline = 'middle';
-  ctx.textAlign = 'center';
+  // Simple 5x7 font bitmap (very basic — covers A-Z, a-z, 0-9, space)
+  const bitmap = buildBitmap(chars, charWidth, charHeight);
 
-  // Add a slight wave/curve to simulate handwriting
-  ctx.save();
-  ctx.translate(width / 2, height / 2);
-  ctx.rotate(-0.02); // slight tilt
-  ctx.fillText(name, 0, 0);
-  ctx.restore();
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const di = (y * width + x) * 4;
+      const bx = x - startX;
+      const by = y - startY;
+      if (bx >= 0 && bx < chars.length * charWidth && by >= 0 && by < charHeight) {
+        const charIdx = Math.floor(bx / charWidth);
+        const px = bx % charWidth;
+        if (bitmap[charIdx] && bitmap[charIdx][by] && bitmap[charIdx][by][px]) {
+          png.data[di] = 26;     // dark blue
+          png.data[di + 1] = 26;
+          png.data[di + 2] = 138;
+          png.data[di + 3] = 220;
+        } else {
+          png.data[di + 3] = 0;  // transparent
+        }
+      } else {
+        png.data[di + 3] = 0;    // transparent
+      }
+    }
+  }
 
-  // Add underline flourish
-  ctx.strokeStyle = '#1a1a8a';
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  const textWidth = ctx.measureText(name).width;
-  const startX = (width - textWidth) / 2 + 20;
-  ctx.moveTo(startX, height / 2 + 24);
-  ctx.quadraticCurveTo(width / 2, height / 2 + 40, width - startX, height / 2 + 20);
-  ctx.stroke();
+  return PNG.sync.write(png);
+}
 
-  return canvas.toBuffer('image/png');
+// Minimal bitmap font for signature fallback (only covers needed chars)
+function buildBitmap(chars, cw, ch) {
+  const glyphs = {};
+  // Simplified 7x10 glyph patterns for common letters
+  const patterns = {
+    'A': ['  ##  ',' #  # ',' #  # ','##### ','#    #','#    #','#    #'],
+    'B': ['####  ','#   # ','####  ','#   # ','#   # ','#   # ','####  '],
+    'C': [' #### ','#    #','#     ','#     ','#     ','#    #',' #### '],
+    'D': ['####  ','#   # ','#    #','#    #','#    #','#   # ','####  '],
+    'E': ['######','#     ','####  ','#     ','#     ','#     ','######'],
+    'F': ['######','#     ','####  ','#     ','#     ','#     ','#     '],
+    'G': [' #### ','#    #','#     ','#  ###','#    #','#   # ',' ###  '],
+    'H': ['#    #','#    #','######','#    #','#    #','#    #','#    #'],
+    'I': ['##### ','  #   ','  #   ','  #   ','  #   ','  #   ','##### '],
+    'J': [' #####','    # ','    # ','    # ','#   # ','#   # ',' ###  '],
+    'K': ['#   # ','#  #  ','###   ','#  #  ','#   # ','#    #','#    #'],
+    'L': ['#     ','#     ','#     ','#     ','#     ','#     ','######'],
+    'M': ['#    #','##  ##','# ## #','# #  #','#    #','#    #','#    #'],
+    'N': ['#    #','##   #','# #  #','#  # #','#   ##','#    #','#    #'],
+    'O': [' ###  ','#   # ','#    #','#    #','#    #','#   # ',' ###  '],
+    'P': ['####  ','#   # ','#   # ','####  ','#     ','#     ','#     '],
+    'Q': [' ###  ','#   # ','#    #','#    #','#  # #','#   # ',' #### '],
+    'R': ['####  ','#   # ','#   # ','####  ','#  #  ','#   # ','#    #'],
+    'S': [' #### ','#    #','#     ',' ###  ','     #','#    #',' #### '],
+    'T': ['##### ','  #   ','  #   ','  #   ','  #   ','  #   ','  #   '],
+    'U': ['#    #','#    #','#    #','#    #','#    #','#   # ',' ###  '],
+    'V': ['#    #','#    #',' #  # ',' #  # ','  ##  ','  ##  ','   #   '],
+    'W': ['#    #','#    #','#    #','# #  #','# #  #','##  ##','#    #'],
+    'X': ['#    #',' #  # ','  ##  ','  ##  ','  ##  ',' #  # ','#    #'],
+    'Y': ['#    #',' #  # ','  ##  ','   #   ','   #   ','   #   ','   #   '],
+    'Z': ['######','    # ','   #  ','  #   ',' #    ','#     ','######'],
+    ' ': ['       ','       ','       ','       ','       ','       ','       '],
+    'a': ['       ','  ##  ','     #',' #####','#    #','#   # ',' #### '],
+    'e': ['       ','      ',' #### ','#    #','######','#     ',' #### '],
+    'h': ['#     ','#     ','# ### ','##   #','#    #','#    #','#    #'],
+    'i': ['  #   ','      ',' ##   ','  #   ','  #   ','  #   ','##### '],
+    'k': ['#     ','#     ','#   # ','#  #  ','###   ','#  #  ','#   #'],
+    'l': [' ##   ','  #   ','  #   ','  #   ','  #   ','  #   ','##### '],
+    'm': ['       ','       ','# # # ','# # # ','# # # ','# # # ','# # # '],
+    'n': ['       ','       ','# ### ','##   #','#    #','#    #','#    #'],
+    'o': ['       ','       ',' ###  ','#   # ','#    #','#   # ',' ###  '],
+    'q': ['       ','       ',' #### ','#    #','#   ##',' #### ','     #'],
+    'r': ['       ','       ','# ### ','##    ','#     ','#     ','#     '],
+    's': ['       ','       ',' #### ','#     ',' ###  ','     #','####  '],
+    't': ['  #   ','  #   ','##### ','  #   ','  #   ','  #   ','   ## '],
+    'u': ['       ','       ','#    #','#    #','#    #','#   # ',' #### '],
+    'w': ['       ','       ','#    #','# #  #','# #  #','# #  #',' ###  '],
+    'y': ['       ','       ','#    #',' #  # ','  ##  ','  #   ','##    '],
+    'z': ['       ','       ','######','   #  ','  #   ',' #    ','######'],
+  };
+
+  return chars.map(c => {
+    const p = patterns[c] || patterns[' '];
+    const rows = [];
+    for (const row of p) {
+      const pixels = [];
+      for (const ch of row) {
+        pixels.push(ch === '#');
+      }
+      // Pad to charWidth
+      while (pixels.length < cw) pixels.push(false);
+      rows.push(pixels.slice(0, cw));
+    }
+    // Pad to charHeight
+    while (rows.length < ch) rows.push(new Array(cw).fill(false));
+    return rows.slice(0, ch);
+  });
 }
 
 // Extract embedded signature images from PDF binary
